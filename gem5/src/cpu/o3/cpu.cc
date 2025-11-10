@@ -120,9 +120,12 @@ CPU::CPU(const BaseO3CPUParams &params)
 {
     // Runahead init
     enableRunahead = params.enableRunahead;
-    raDefaultBudget = params.runaheadBudget;
+
     _inRunahead.fill(false);
     raBudget.fill(0);
+    raDefaultBudget.fill(params.runaheadBudget);
+    raAnchorSeqNum.fill(0);
+    // raCkpt entries default to {pc=null, valid=false}
 
     fatal_if(FullSystem && params.numThreads > 1,
             "SMT is not supported in O3 in full system mode currently.");
@@ -311,14 +314,20 @@ CPU::CPU(const BaseO3CPUParams &params)
 
 // Runahead functions
 
+void
 CPU::enterRunahead(ThreadID tid)
 {
     if (!enableRunahead || _inRunahead[tid] || isDraining()) return;
+
     raCkpt[tid].pc = pc[tid]->clone();
     raCkpt[tid].valid = true;
+
     _inRunahead[tid] = true;
-    raBudget[tid] = raDefaultBudget;
-    DPRINTF(Runahead, "Enter runahead [tid:%d] pc=%s\n", tid, *raCkpt[tid].pc);
+    raBudget[tid] = raDefaultBudget[tid];
+
+    DPRINTF(Runahead, "Enter runahead [tid:%d] pc=%s budget=%llu\n",
+            tid, *raCkpt[tid].pc,
+            static_cast<unsigned long long>(raBudget[tid]));
 
     cpuStats.runaheadPeriods++;
 }
@@ -327,11 +336,17 @@ void
 CPU::exitRunahead(ThreadID tid)
 {
     if (!_inRunahead[tid]) return;
+
     if (raCkpt[tid].valid && raCkpt[tid].pc)
         pcState(*raCkpt[tid].pc, tid);  // restore PC only
+
     raCkpt[tid].valid = false;
     raCkpt[tid].pc.reset();
+
     _inRunahead[tid] = false;
+    raBudget[tid] = 0;              // ensure no residual budget
+    raAnchorSeqNum[tid] = 0;        // clear the anchor
+
     DPRINTF(Runahead, "Exit runahead [tid:%d]\n", tid);
 }
 
@@ -411,6 +426,10 @@ CPU::CPUStats::CPUStats(CPU *cpu)
                "Cycles spent in normal (non-runahead) mode"),
       ADD_STAT(pseudoRetiredInsts, statistics::units::Count::get(),
                "Pseudo-retired instructions per thread during runahead")
+      ADD_STAT(raExitAnchor, statistics::units::Count::get(),
+               "Runahead exits due to anchor becoming ready (per thread)"),
+      ADD_STAT(raExitBudget, statistics::units::Count::get(),
+               "Runahead exits due to budget exhaustion (per thread)")
 {
     // Register any of the O3CPU's stats here.
     timesIdled
@@ -493,7 +512,15 @@ CPU::CPUStats::CPUStats(CPU *cpu)
     pseudoRetiredInsts
         .init(cpu->numThreads)
         .flags(statistics::total);
-    }
+
+    raExitAnchor
+        .init(cpu->numThreads)
+        .flags(statistics::total);
+
+    raExitBudget
+        .init(cpu->numThreads)
+        .flags(statistics::total);
+}
 
 void
 CPU::tick()

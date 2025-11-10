@@ -107,10 +107,19 @@ class CPU : public BaseCPU
     void exitRunahead(ThreadID tid);
     inline bool inRunahead(ThreadID tid) const { return _inRunahead[tid]; }
     bool runaheadEnabled() const { return enableRunahead; }
+
     bool spendRABudget(ThreadID tid) {
         if (raBudget[tid] > 0) --raBudget[tid];
         return raBudget[tid] == 0;
     }
+
+    inline void setRunaheadAnchor(ThreadID tid, InstSeqNum sn) {
+        raAnchorSeqNum[tid] = sn;
+    }
+    inline InstSeqNum runaheadAnchorSeqNum(ThreadID tid) const {
+        return raAnchorSeqNum[tid];
+    }
+
   private:
     bool enableRunahead = false;                 // set from params
     std::array<bool, MaxThreads> _inRunahead{};  // per-thread state
@@ -121,8 +130,12 @@ class CPU : public BaseCPU
         bool valid = false;
     };
     std::array<RunaheadCkpt, MaxThreads> raCkpt;
-    std::array<uint32_t, MaxThreads> raBudget{};
-    uint32_t raDefaultBudget = 1024;
+
+    std::array<Counter, MaxThreads> raBudget{};
+    std::array<Counter, MaxThreads> raDefaultBudget{};
+
+    // seqnum of the instruction that triggered RA
+    std::array<InstSeqNum, MaxThreads> raAnchorSeqNum{};
 
   public:
 
@@ -606,6 +619,9 @@ class CPU : public BaseCPU
         statistics::Scalar runaheadPeriods;
         statistics::Scalar runaheadCycles;
         statistics::Vector pseudoRetiredInsts;
+
+	statistics::Vector raExitAnchor;  // exit when anchor becomes ready
+        statistics::Vector raExitBudget;  // exit due to budget exhaustion
 
         /** Stat for total number of times the CPU is descheduled. */
         statistics::Scalar timesIdled;
