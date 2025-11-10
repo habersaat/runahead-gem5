@@ -991,21 +991,29 @@ Commit::commitInsts()
 	// head has become ready again, we exit runahead 
 	// and squash back to the checkpoint so we replay
 	// architecturally
-        if (commit_thread != (ThreadID)-1 &&
-            cpu->inRunahead(commit_thread) &&
-            rob->isHeadReady(commit_thread)) {
-
+	if (cpu->inRunahead(commit_thread)) {
             // We need the current head inst to drive squashAfter() as usual
             DynInstPtr head_inst = rob->readHeadInst(commit_thread);
-            ThreadID tid = head_inst->threadNumber;
+	    const InstSeqNum anchor = cpu->runaheadAnchorSeqNum(commit_thread);
 
-            DPRINTF(Runahead,
-                "Head ready again; exiting runahead [tid:%d] sn:%llu\n",
-                tid, head_inst->seqNum);
+	    DPRINTF(Runahead,
+                "Anchor ready; exiting runahead [tid:%d] sn:%llu\n",
+                tid, h->seqNum);
 
-            cpu->exitRunahead(tid);
-            squashAfter(tid, head_inst);
-            break; // squash takes effect, commit on replay
+	    if (rob->isHeadReady(commit_thread) &&
+                    h->seqNum == anchor) {
+                    ThreadID tid = h->threadNumber;
+
+                    DPRINTF(Runahead,
+                        "Anchor ready; exiting runahead [tid:%d] sn:%llu\n",
+                        tid, h->seqNum);
+
+                    cpu->cpuStats.raExitAnchor[tid]++;   // anchor-based exits
+                    cpu->exitRunahead(tid);
+                    squashAfter(tid, h);
+                    break; // squash takes effect; commit on replay
+            }
+
         }
 
         // New runahead logic
@@ -1019,6 +1027,9 @@ Commit::commitInsts()
         if (!inRA && !rob->isHeadReady(commit_thread)) {
             if (cpu->runaheadEnabled() && !cpu->inRunahead(commit_thread)
                             && !cpu->isDraining()) {
+		DynInstPtr anchor_inst = rob->readHeadInst(commit_thread);
+		cpu->setRunaheadAnchor(commit_thread, anchor_inst->seqNum);
+
                 DPRINTF(Runahead,
                     "Head not ready; attempting runahead [tid:%d]\n",
                     commit_thread);
@@ -1059,6 +1070,7 @@ Commit::commitInsts()
                 DPRINTF(Runahead,
                         "Runahead budget hit; exiting [tid:%d]\n",
                         tid);
+		cpu->cpuStats.raExitBudget[tid]++;
                 cpu->exitRunahead(tid);
                 squashAfter(tid, head_inst);
                 break;
