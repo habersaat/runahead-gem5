@@ -684,7 +684,7 @@ Commit::tick()
         } else if (!rob->isEmpty(tid)) {
             const DynInstPtr &inst = rob->readHeadInst(tid);
 
-            kpCommitStall->notify(inst);
+            ppCommitStall->notify(inst);
 
             DPRINTF(Commit,"[tid:%i] Can't commit, Instruction [sn:%llu] PC "
                     "%s is head of ROB and not ready\n",
