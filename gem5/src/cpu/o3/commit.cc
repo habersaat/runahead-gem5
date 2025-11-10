@@ -980,11 +980,33 @@ Commit::commitInsts()
                 avoidQuiesceLiveLock = true;
             } else {
                 handleInterrupt();
+		interrupt = NoFault;
             }
         }
 
         // ThreadID commit_thread = getCommittingThread();
 
+	// Runahead auto-exit check
+        // If we're in runahead for this thread and the ROB 
+	// head has become ready again, we exit runahead 
+	// and squash back to the checkpoint so we replay
+	// architecturally
+        if (commit_thread != (ThreadID)-1 &&
+            cpu->inRunahead(commit_thread) &&
+            rob->isHeadReady(commit_thread)) {
+
+            // We need the current head inst to drive squashAfter() as usual
+            DynInstPtr head_inst = rob->readHeadInst(commit_thread);
+            ThreadID tid = head_inst->threadNumber;
+
+            DPRINTF(Runahead,
+                "Head ready again; exiting runahead [tid:%d] sn:%llu\n",
+                tid, head_inst->seqNum);
+
+            cpu->exitRunahead(tid);
+            squashAfter(tid, head_inst);
+            break; // squash takes effect, commit on replay
+        }
 
         // New runahead logic
         if (commit_thread == -1)
