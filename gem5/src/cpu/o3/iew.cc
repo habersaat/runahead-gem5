@@ -1186,6 +1186,36 @@ IEW::executeInsts()
             continue;
         }
 
+        // Poison propagation: if any source register comes from a poisoned
+        // instruction (runahead load miss), mark this instruction as poisoned too.
+        // This prevents useless speculation chains in runahead mode.
+        //
+        // NOTE: This is a simplified implementation. A full implementation would
+        // track poison bits per physical register in the register file. Here we
+        // use a heuristic: if the instruction has any unready source registers
+        // during runahead, we pessimistically assume they might be poisoned.
+        // This is conservative but correct - it may mark some instructions as
+        // poisoned unnecessarily, but won't miss poisoned dependencies.
+        if (inst->inRunahead() && !inst->isRunaheadPoisoned()) {
+            // Check if any source registers are not ready (potential poison)
+            bool hasUnreadySources = false;
+            for (int src_idx = 0; src_idx < inst->numSrcRegs(); src_idx++) {
+                if (!inst->readySrcIdx(src_idx)) {
+                    hasUnreadySources = true;
+                    break;
+                }
+            }
+            
+            // Conservative poison propagation: mark as poisoned if it has
+            // unready sources during runahead execution. This ensures we don't
+            // build long dependency chains on potentially invalid data.
+            if (hasUnreadySources) {
+                inst->setRunaheadPoisoned(true);
+                DPRINTF(IEW, "Execute: Marked [sn:%llu] as poisoned (unready sources)\n",
+                        inst->seqNum);
+            }
+        }
+
         Fault fault = NoFault;
 
         // Execute instruction.

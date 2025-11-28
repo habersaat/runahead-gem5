@@ -50,6 +50,7 @@
 #include "debug/Activity.hh"
 #include "debug/O3PipeView.hh"
 #include "debug/Rename.hh"
+#include "debug/Runahead.hh"
 #include "params/BaseO3CPU.hh"
 
 namespace gem5
@@ -710,6 +711,13 @@ Rename::renameInsts(ThreadID tid)
         renameSrcRegs(inst, inst->threadNumber);
 
         renameDestRegs(inst, inst->threadNumber);
+
+        // Mark instruction as runahead if CPU is in runahead mode
+        if (cpu->inRunahead(tid)) {
+            inst->inRunahead(true);
+            DPRINTF(Rename, "[tid:%d] Marked instruction [sn:%llu] as runahead\n",
+                    tid, inst->seqNum);
+        }
 
         if (inst->isAtomic() || inst->isStore()) {
             storesInProgress[tid]++;
@@ -1419,6 +1427,63 @@ Rename::dumpHistory()
 
             buf_it++;
         }
+    }
+}
+
+std::vector<std::vector<PhysRegIdPtr>>
+Rename::checkpointRenameMap(ThreadID tid)
+{
+    // Create a checkpoint of the rename map for this thread.
+    // Outer vector: one entry per register class (Int, FP, Vec, VecPred, CC)
+    // Inner vector: arch-to-phys mappings for that register class
+    
+    std::vector<std::vector<PhysRegIdPtr>> snapshot;
+    snapshot.resize(CCRegClass + 1);  // Allocate space for all register classes
+    
+    UnifiedRenameMap *map = renameMap[tid];
+    
+    // Iterate through each register class
+    for (int regClass = IntRegClass; regClass <= CCRegClass; regClass++) {
+        auto& classMap = map->renameMaps[regClass];
+        
+        // Copy all architectural register mappings for this class
+        snapshot[regClass].reserve(classMap.numArchRegs());
+        for (auto it = classMap.cbegin(); it != classMap.cend(); ++it) {
+            snapshot[regClass].push_back(*it);
+        }
+        
+        DPRINTF(Runahead, "[tid:%d] Checkpointed %lu mappings for reg class %d\n",
+                tid, snapshot[regClass].size(), regClass);
+    }
+    
+    return snapshot;
+}
+
+void
+Rename::restoreRenameMap(ThreadID tid,
+                         const std::vector<std::vector<PhysRegIdPtr>>& snapshot)
+{
+    // Restore the rename map from a runahead checkpoint.
+    // This undoes all speculative register allocations done during runahead.
+    
+    UnifiedRenameMap *map = renameMap[tid];
+    
+    // Iterate through each register class
+    for (int regClass = IntRegClass; regClass <= CCRegClass; regClass++) {
+        if (regClass >= (int)snapshot.size())
+            continue;  // Skip if this class wasn't checkpointed
+            
+        auto& classMap = map->renameMaps[regClass];
+        const auto& classSnapshot = snapshot[regClass];
+        
+        // Restore each architectural register mapping
+        size_t archIdx = 0;
+        for (auto it = classMap.begin(); it != classMap.end() && archIdx < classSnapshot.size(); ++it, ++archIdx) {
+            *it = classSnapshot[archIdx];
+        }
+        
+        DPRINTF(Runahead, "[tid:%d] Restored %lu mappings for reg class %d\n",
+                tid, classSnapshot.size(), regClass);
     }
 }
 

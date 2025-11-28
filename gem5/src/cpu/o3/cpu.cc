@@ -312,45 +312,90 @@ CPU::CPU(const BaseO3CPUParams &params)
     }
 }
 
-// Runahead functions
+// Runahead functions, all added for Project
 
+// Enter runahead mode for a given thread [tid].
+// This function initializes runahead if:
+//  - runahead is enabled,
+//  - this thread isn't already in runahead,
+//  - and the CPU isn't in draining state.
 void
 CPU::enterRunahead(ThreadID tid)
 {
+    // If runahead is disabled, already active on this thread, or draining,
+    // do nothing.
     if (!enableRunahead || _inRunahead[tid] || isDraining()) return;
 
+    // Save the current PC for this thread so we can restore when exiting runahead.
     raCkpt[tid].pc = pc[tid]->clone();
     raCkpt[tid].valid = true;
 
+    // Checkpoint rename map state (architectural-to-physical register mappings)
+    raCkpt[tid].renameMapSnapshot = rename.checkpointRenameMap(tid);
+    
+    // Checkpoint free list state (available physical registers)
+    raCkpt[tid].freeListSnapshot = freeList.checkpoint();
+
+    // Mark the thread as in runahead.
     _inRunahead[tid] = true;
+    // Reset the runahead budget for this thread to the default.
     raBudget[tid] = raDefaultBudget[tid];
 
-    DPRINTF(Runahead, "Enter runahead [tid:%d] pc=%s budget=%llu\n",
+    // Print debug information about entering runahead, including thread id,
+    // saved PC and the budget.
+    DPRINTF(Runahead, "Enter runahead [tid:%d] pc=%s budget=%llu "
+            "(checkpointed rename map and free list)\n",
             tid, *raCkpt[tid].pc,
             static_cast<unsigned long long>(raBudget[tid]));
 
+    // Increment the statistic tracking # of runahead periods.
     cpuStats.runaheadPeriods++;
 }
 
+// Exits runahead mode for the specified thread.
+// If the thread is not in runahead, do nothing.
 void
 CPU::exitRunahead(ThreadID tid)
 {
+    // Only exit runahead if the thread is currently in runahead mode.
     if (!_inRunahead[tid]) return;
 
-    if (raCkpt[tid].valid && raCkpt[tid].pc)
-        pcState(*raCkpt[tid].pc, tid);  // restore PC only
+    // If a valid checkpoint exists, restore all architectural state
+    if (raCkpt[tid].valid) {
+        // Restore PC
+        if (raCkpt[tid].pc)
+            pcState(*raCkpt[tid].pc, tid);
+        
+        // Restore rename map (architectural-to-physical register mappings)
+        if (!raCkpt[tid].renameMapSnapshot.empty()) {
+            rename.restoreRenameMap(tid, raCkpt[tid].renameMapSnapshot);
+        }
+        
+        // Restore free list (available physical registers)
+        if (!raCkpt[tid].freeListSnapshot.empty()) {
+            freeList.restore(raCkpt[tid].freeListSnapshot);
+        }
+    }
 
+    // Invalidate the checkpoint after restoring.
     raCkpt[tid].valid = false;
     raCkpt[tid].pc.reset();
+    raCkpt[tid].renameMapSnapshot.clear();
+    raCkpt[tid].freeListSnapshot.clear();
 
+    // Mark the thread as no longer in runahead.
     _inRunahead[tid] = false;
+    // Clear the runahead budget for this thread.
     raBudget[tid] = 0;              // ensure no residual budget
+    // Clear the anchor sequence number for this thread.
     raAnchorSeqNum[tid] = 0;        // clear the anchor
 
-    DPRINTF(Runahead, "Exit runahead [tid:%d]\n", tid);
+    // Output debug information indicating runahead exit.
+    DPRINTF(Runahead, "Exit runahead [tid:%d] (restored rename map and free list)\n", tid);
 }
 
 // ----------------------------------------------
+// End of Project
 
 void
 CPU::regProbePoints()

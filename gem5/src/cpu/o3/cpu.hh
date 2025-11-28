@@ -102,53 +102,83 @@ class CPU : public BaseCPU
     friend class ThreadContext;
 
   public:
-    // Runahead control API (we added)
+    // ----------- Runahead Control API (Project Addition) -----------
+    // Enter runahead execution mode for a thread (tid).
+    // See cpu.cc for implementation and entry conditions.
     void enterRunahead(ThreadID tid);
+
+    // Exit runahead mode for a thread (tid), restore architectural state as needed.
     void exitRunahead(ThreadID tid);
+
+    // Query: Is the given thread (tid) currently in runahead mode?
     inline bool inRunahead(ThreadID tid) const { return _inRunahead[tid]; }
+
+    // Query: Is runahead generally enabled for this CPU (any thread)?
     bool runaheadEnabled() const { return enableRunahead; }
 
+    // Deduct one from the remaining runahead budget for this thread (tid).
+    // Returns true if the budget is now exhausted and runahead should exit.
     bool spendRABudget(ThreadID tid) {
         if (raBudget[tid] > 0) --raBudget[tid];
         return raBudget[tid] == 0;
     }
 
+    // Set the anchor sequence number (sn) marking the ROB instruction
+    // at which runahead will automatically exit for thread (tid).
     inline void setRunaheadAnchor(ThreadID tid, InstSeqNum sn) {
         raAnchorSeqNum[tid] = sn;
     }
+
+    // Get the current runahead anchor sequence number for this thread (tid).
     inline InstSeqNum runaheadAnchorSeqNum(ThreadID tid) const {
         return raAnchorSeqNum[tid];
     }
 
   private:
-    bool enableRunahead = false;                 // set from params
-    std::array<bool, MaxThreads> _inRunahead{};  // per-thread state
+    // Runahead is enabled (set from CPU params).
+    bool enableRunahead = false;
 
+    // Per-thread: Is thread in runahead mode?
+    std::array<bool, MaxThreads> _inRunahead{};
+
+    // Per-thread checkpoint for runahead (PC state + valid flag).
     struct RunaheadCkpt
     {
-        std::unique_ptr<PCStateBase> pc;  // saved commit PC
-        bool valid = false;
+        std::unique_ptr<PCStateBase> pc;  // Saved commit PC for restoration on RA exit
+        bool valid = false;               // Is the checkpoint valid?
+        
+        // Rename map checkpoint: stores architectural-to-physical register mappings
+        // for all register classes (int, fp, vec, etc.)
+        std::vector<std::vector<PhysRegIdPtr>> renameMapSnapshot;
+        
+        // Free list checkpoint: stores the list of free physical registers
+        // for each register class to restore allocation state
+        std::vector<std::vector<PhysRegIdPtr>> freeListSnapshot;
     };
-    std::array<RunaheadCkpt, MaxThreads> raCkpt;
+    std::array<RunaheadCkpt, MaxThreads> raCkpt; // Array indexed by thread
 
+    // Per-thread: Current and default runahead budgets (in instructions)
     std::array<Counter, MaxThreads> raBudget{};
     std::array<Counter, MaxThreads> raDefaultBudget{};
 
-    // seqnum of the instruction that triggered RA
+    // Per-thread: Sequence number for runahead anchor (instruction that triggered RA)
     std::array<InstSeqNum, MaxThreads> raAnchorSeqNum{};
 
   public:
 
+    // Overall CPU operational status
     enum Status
     {
-        Running,
-        Idle,
-        Halted,
-        Blocked,
-        SwitchedOut
+        Running,      // Pipeline is actively executing instructions
+        Idle,         // Pipeline is idle, e.g., no ready threads
+        Halted,       // Halt requested (e.g., shutdown)
+        Blocked,      // Blocked waiting for resources (e.g., barrier/fence)
+        SwitchedOut   // Context switched out (not currently resident)
     };
 
+    // Pointer to the CPU MMU (memory management unit)
     BaseMMU *mmu;
+    // Alias for LSQ request type
     using LSQRequest = LSQ::LSQRequest;
 
     /** Overall CPU status. */
@@ -615,13 +645,15 @@ class CPU : public BaseCPU
     {
         CPUStats(CPU *cpu);
 
+        // All added for Project
         // Runahead stats
         statistics::Scalar runaheadPeriods;
         statistics::Scalar runaheadCycles;
         statistics::Vector pseudoRetiredInsts;
 
-	statistics::Vector raExitAnchor;  // exit when anchor becomes ready
+	      statistics::Vector raExitAnchor;  // exit when anchor becomes ready
         statistics::Vector raExitBudget;  // exit due to budget exhaustion
+        // End of Project
 
         /** Stat for total number of times the CPU is descheduled. */
         statistics::Scalar timesIdled;

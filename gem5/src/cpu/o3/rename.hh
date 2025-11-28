@@ -198,6 +198,21 @@ class Rename
     /** Debugging function used to dump history buffer of renamings. */
     void dumpHistory();
 
+    /** Checkpoint the rename map state for runahead execution.
+     * Saves all architectural-to-physical register mappings.
+     * @param tid Thread ID to checkpoint.
+     * @return Vector of vectors, one per register class, containing the mappings.
+     */
+    std::vector<std::vector<PhysRegIdPtr>> checkpointRenameMap(ThreadID tid);
+
+    /** Restore the rename map state from a runahead checkpoint.
+     * Restores architectural-to-physical register mappings.
+     * @param tid Thread ID to restore.
+     * @param snapshot The saved rename map state to restore.
+     */
+    void restoreRenameMap(ThreadID tid, 
+                          const std::vector<std::vector<PhysRegIdPtr>>& snapshot);
+
   private:
     /** Reset this pipeline stage */
     void resetStage();

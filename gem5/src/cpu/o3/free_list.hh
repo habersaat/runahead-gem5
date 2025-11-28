@@ -105,6 +105,38 @@ class SimpleFreeList
 
     /** True iff there are free registers on the list. */
     bool hasFreeRegs() const { return !freeRegs.empty(); }
+
+    /** Checkpoint the free list state for runahead execution.
+     * Returns a copy of all free registers currently in the list.
+     * @return Vector containing all free physical register IDs.
+     */
+    std::vector<PhysRegIdPtr> checkpoint() const
+    {
+        std::vector<PhysRegIdPtr> snapshot;
+        // Copy queue contents to vector (requires iterating through queue)
+        std::queue<PhysRegIdPtr> tempQueue = freeRegs;
+        while (!tempQueue.empty()) {
+            snapshot.push_back(tempQueue.front());
+            tempQueue.pop();
+        }
+        return snapshot;
+    }
+
+    /** Restore the free list state from a runahead checkpoint.
+     * Replaces the current free list with the saved state.
+     * @param snapshot Vector containing free physical register IDs to restore.
+     */
+    void restore(const std::vector<PhysRegIdPtr>& snapshot)
+    {
+        // Clear current free list
+        while (!freeRegs.empty()) {
+            freeRegs.pop();
+        }
+        // Restore from snapshot
+        for (auto reg : snapshot) {
+            freeRegs.push(reg);
+        }
+    }
 };
 
 
@@ -138,11 +170,13 @@ class UnifiedFreeList
     PhysRegFile *regFile;
 
     /*
-     * We give UnifiedRenameMap internal access so it can get at the
+     * We give UnifiedRenameMap and Rename internal access so they can get at the
      * internal per-class free lists and associate those with its
      * per-class rename maps. See UnifiedRenameMap::init().
+     * Rename needs access for runahead checkpointing.
      */
     friend class UnifiedRenameMap;
+    friend class Rename;
 
   public:
     /** Constructs a free list.
@@ -188,6 +222,37 @@ class UnifiedFreeList
     numFreeRegs(RegClassType type) const
     {
         return freeLists[type].numFreeRegs();
+    }
+
+    /** Checkpoint all free lists for runahead execution.
+     * Saves the state of free registers for all register classes.
+     * @return Vector of vectors, one per register class, containing free register IDs.
+     */
+    std::vector<std::vector<PhysRegIdPtr>> checkpoint() const
+    {
+        std::vector<std::vector<PhysRegIdPtr>> snapshot;
+        snapshot.resize(CCRegClass + 1);
+        
+        // Checkpoint each register class's free list
+        for (int regClass = IntRegClass; regClass <= CCRegClass; regClass++) {
+            snapshot[regClass] = freeLists[regClass].checkpoint();
+        }
+        
+        return snapshot;
+    }
+
+    /** Restore all free lists from a runahead checkpoint.
+     * Restores the free register state for all register classes.
+     * @param snapshot Vector of vectors containing free register IDs for each class.
+     */
+    void restore(const std::vector<std::vector<PhysRegIdPtr>>& snapshot)
+    {
+        // Restore each register class's free list
+        for (int regClass = IntRegClass; regClass <= CCRegClass; regClass++) {
+            if (regClass < (int)snapshot.size()) {
+                freeLists[regClass].restore(snapshot[regClass]);
+            }
+        }
     }
 };
 

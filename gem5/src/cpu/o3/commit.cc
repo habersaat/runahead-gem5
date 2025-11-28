@@ -1024,17 +1024,27 @@ Commit::commitInsts()
 
         // If we're not in runahead, then a non-ready head means
         // we try to enter RA and stop.
+        // If we're not currently in runahead mode (inRA == false) and the head
+        // of the ROB is not ready to commit (isHeadReady == false), we attempt
+        // to enter runahead mode if it is enabled for this CPU/thread and we're not draining.
         if (!inRA && !rob->isHeadReady(commit_thread)) {
+            // Only enter runahead if setting is enabled, this thread isn't already in RA,
+            // and the core isn't draining.
             if (cpu->runaheadEnabled() && !cpu->inRunahead(commit_thread)
                             && !cpu->isDraining()) {
-		DynInstPtr anchor_inst = rob->readHeadInst(commit_thread);
-		cpu->setRunaheadAnchor(commit_thread, anchor_inst->seqNum);
+                // Get the current head instruction for this thread to use as the anchor.
+                DynInstPtr anchor_inst = rob->readHeadInst(commit_thread);
+                // Set the anchor sequence number for this thread - when this instruction is ready,
+                // we will automatically exit runahead.
+                cpu->setRunaheadAnchor(commit_thread, anchor_inst->seqNum);
 
                 DPRINTF(Runahead,
                     "Head not ready; attempting runahead [tid:%d]\n",
                     commit_thread);
+                // Actually jump into runahead mode for this thread.
                 cpu->enterRunahead(commit_thread);
             }
+            // Break out of the commit loop for this cycle; next actions depend on runahead state.
             break;
         }
 

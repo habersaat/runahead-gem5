@@ -53,6 +53,7 @@
 #include "debug/IEW.hh"
 #include "debug/LSQUnit.hh"
 #include "debug/O3PipeView.hh"
+#include "debug/Runahead.hh"
 #include "mem/packet.hh"
 #include "mem/request.hh"
 
@@ -807,6 +808,17 @@ LSQUnit::writebackStores()
             break;
         }
 
+        // Suppress stores that are marked as runahead - they should not
+        // modify architectural memory state.
+        if (storeWBIt->instruction()->inRunahead()) {
+            DPRINTF(LSQUnit, "Suppressing runahead store [sn:%llu] PC:%s\n",
+                    storeWBIt->instruction()->seqNum,
+                    storeWBIt->instruction()->pcState());
+            // Mark as completed without writing to memory
+            completeStore(storeWBIt++);
+            continue;
+        }
+
         // Store didn't write any data so no need to write it back to
         // memory.
         if (storeWBIt->size() == 0) {
@@ -1089,6 +1101,15 @@ LSQUnit::writeback(const DynInstPtr &inst, PacketPtr pkt)
         if (inst->fault == NoFault) {
             // Complete access to copy data to proper place.
             inst->completeAcc(pkt);
+            
+            // Mark loads as poisoned if executing in runahead mode.
+            // In runahead, load results are speculative and shouldn't be
+            // used to generate meaningful work.
+            if (inst->inRunahead() && inst->isLoad()) {
+                inst->setRunaheadPoisoned(true);
+                DPRINTF(LSQUnit, "Marked runahead load [sn:%llu] as poisoned\n",
+                        inst->seqNum);
+            }
         } else {
             // If the instruction has an outstanding fault, we cannot complete
             // the access as this discards the current fault.

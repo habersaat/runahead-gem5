@@ -187,6 +187,8 @@ class DynInst : public ExecContext, public RefCounted
         ReqMade,
         MemOpDone,
         HtmFromTransaction,
+        InRunahead,              // Instruction is executing in runahead mode
+        RunaheadPoisoned,        // Load result is poisoned (missed in runahead)
         MaxFlags
     };
 
@@ -450,6 +452,18 @@ class DynInst : public ExecContext, public RefCounted
     {
         return (translationStarted() && !translationCompleted());
     }
+
+    /** True if this instruction is executing in runahead mode.
+     * Used to suppress stores and other architectural side effects.
+     */
+    bool inRunahead() const { return instFlags[InRunahead]; }
+    void inRunahead(bool f) { instFlags[InRunahead] = f; }
+
+    /** True if this instruction's result is poisoned (load miss in runahead).
+     * Poisoned instructions should not be used to generate further useful work.
+     */
+    bool isRunaheadPoisoned() const { return instFlags[RunaheadPoisoned]; }
+    void setRunaheadPoisoned(bool f) { instFlags[RunaheadPoisoned] = f; }
 
   public:
 #ifdef DEBUG
