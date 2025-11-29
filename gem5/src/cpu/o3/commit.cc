@@ -996,21 +996,17 @@ Commit::commitInsts()
             DynInstPtr head_inst = rob->readHeadInst(commit_thread);
 	    const InstSeqNum anchor = cpu->runaheadAnchorSeqNum(commit_thread);
 
-	    DPRINTF(Runahead,
-                "Anchor ready; exiting runahead [tid:%d] sn:%llu\n",
-                tid, h->seqNum);
-
 	    if (rob->isHeadReady(commit_thread) &&
-                    h->seqNum == anchor) {
-                    ThreadID tid = h->threadNumber;
+                    head_inst->seqNum == anchor) {
+                    ThreadID tid = head_inst->threadNumber;
 
                     DPRINTF(Runahead,
                         "Anchor ready; exiting runahead [tid:%d] sn:%llu\n",
-                        tid, h->seqNum);
+                        tid, head_inst->seqNum);
 
                     cpu->cpuStats.raExitAnchor[tid]++;   // anchor-based exits
                     cpu->exitRunahead(tid);
-                    squashAfter(tid, h);
+                    squashAfter(tid, head_inst);
                     break; // squash takes effect; commit on replay
             }
 

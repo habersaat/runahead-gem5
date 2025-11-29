@@ -327,7 +327,7 @@ CPU::enterRunahead(ThreadID tid)
     if (!enableRunahead || _inRunahead[tid] || isDraining()) return;
 
     // Save the current PC for this thread so we can restore when exiting runahead.
-    raCkpt[tid].pc = pc[tid]->clone();
+    raCkpt[tid].pc = pcState(tid).clone();
     raCkpt[tid].valid = true;
 
     // Checkpoint rename map state (architectural-to-physical register mappings)
@@ -467,10 +467,10 @@ CPU::CPUStats::CPUStats(CPU *cpu)
                "number of misc regfile writes"),
       ADD_STAT(runaheadCycles, statistics::units::Cycle::get(),
                "Cycles spent in runahead mode"),
-      ADD_STAT(realCycles, statistics::units::Cycle::get(),
-               "Cycles spent in normal (non-runahead) mode"),
+      ADD_STAT(runaheadPeriods, statistics::units::Count::get(),
+               "Number of runahead periods entered"),
       ADD_STAT(pseudoRetiredInsts, statistics::units::Count::get(),
-               "Pseudo-retired instructions per thread during runahead")
+               "Pseudo-retired instructions per thread during runahead"),
       ADD_STAT(raExitAnchor, statistics::units::Count::get(),
                "Runahead exits due to anchor becoming ready (per thread)"),
       ADD_STAT(raExitBudget, statistics::units::Count::get(),
@@ -495,6 +495,18 @@ CPU::CPUStats::CPUStats(CPU *cpu)
         .flags(statistics::total);
 
     committedOps
+        .init(cpu->numThreads)
+        .flags(statistics::total);
+
+    pseudoRetiredInsts
+        .init(cpu->numThreads)
+        .flags(statistics::total);
+
+    raExitAnchor
+        .init(cpu->numThreads)
+        .flags(statistics::total);
+
+    raExitBudget
         .init(cpu->numThreads)
         .flags(statistics::total);
 
@@ -631,7 +643,6 @@ CPU::tick()
     for (ThreadID t = 0; t < thread.size(); ++t)
         anyRA = anyRA || inRunahead(t);
     if (anyRA) cpuStats.runaheadCycles++;
-    else       cpuStats.realCycles++;
 }
 
 void
