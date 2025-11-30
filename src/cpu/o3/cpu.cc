@@ -1490,7 +1490,7 @@ CPU::exitRunahead(ThreadID tid, const char *reason)
     // Restore architectural state
     if (raCkpt[tid].valid) {
         // Restore PC
-        set(pcState(tid), *raCkpt[tid].pc);
+        pcState(*raCkpt[tid].pc, tid);
 
         // Restore rename map and free list
         rename.restoreRenameMap(tid, raCkpt[tid].renameMapSnapshot);
