@@ -1445,15 +1445,14 @@ Rename::checkpointRenameMap(ThreadID tid)
 {
     std::vector<std::vector<PhysRegIdPtr>> snapshot;
     
+    // Access the internal renameMaps array (we're a friend class)
     for (int reg_class_idx = 0; reg_class_idx < CCRegClass + 1; reg_class_idx++) {
-        RegClassType reg_class = (RegClassType)reg_class_idx;
-        int num_arch_regs = renameMap[tid].numArchRegs(reg_class);
+        const auto& simple_map = renameMap[tid].renameMaps[reg_class_idx];
         std::vector<PhysRegIdPtr> class_snapshot;
         
-        for (int arch_reg = 0; arch_reg < num_arch_regs; arch_reg++) {
-            RegId arch_reg_id(reg_class, arch_reg);
-            PhysRegIdPtr phys_reg = renameMap[tid].lookup(arch_reg_id);
-            class_snapshot.push_back(phys_reg);
+        // Copy the entire map vector
+        for (auto it = simple_map.begin(); it != simple_map.end(); ++it) {
+            class_snapshot.push_back(*it);
         }
         
         snapshot.push_back(class_snapshot);
@@ -1466,13 +1465,19 @@ void
 Rename::restoreRenameMap(ThreadID tid, 
                         const std::vector<std::vector<PhysRegIdPtr>>& snapshot)
 {
-    for (int reg_class_idx = 0; reg_class_idx < snapshot.size(); reg_class_idx++) {
-        RegClassType reg_class = (RegClassType)reg_class_idx;
+    for (int reg_class_idx = 0; reg_class_idx < snapshot.size() && 
+         reg_class_idx < CCRegClass + 1; reg_class_idx++) {
+        auto& simple_map = renameMap[tid].renameMaps[reg_class_idx];
+        const auto& class_snapshot = snapshot[reg_class_idx];
         
-        for (int arch_reg = 0; arch_reg < snapshot[reg_class_idx].size(); arch_reg++) {
-            RegId arch_reg_id(reg_class, arch_reg);
-            PhysRegIdPtr phys_reg = snapshot[reg_class_idx][arch_reg];
-            renameMap[tid].setEntry(arch_reg_id, phys_reg);
+        // Restore each mapping by index
+        for (size_t arch_reg = 0; arch_reg < class_snapshot.size(); arch_reg++) {
+            if (arch_reg < simple_map.numArchRegs()) {
+                // Create a RegId using index directly for setEntry
+                auto it = simple_map.begin();
+                std::advance(it, arch_reg);
+                *it = class_snapshot[arch_reg];
+            }
         }
     }
 }
