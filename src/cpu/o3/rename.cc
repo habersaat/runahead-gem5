@@ -1447,7 +1447,7 @@ Rename::checkpointRenameMap(ThreadID tid)
     
     // Access the internal renameMaps array (we're a friend class)
     for (int reg_class_idx = 0; reg_class_idx < CCRegClass + 1; reg_class_idx++) {
-        const auto& simple_map = renameMap[tid].renameMaps[reg_class_idx];
+        const auto& simple_map = renameMap[tid]->renameMaps[reg_class_idx];
         std::vector<PhysRegIdPtr> class_snapshot;
         
         // Copy the entire map vector
@@ -1467,7 +1467,7 @@ Rename::restoreRenameMap(ThreadID tid,
 {
     for (int reg_class_idx = 0; reg_class_idx < snapshot.size() && 
          reg_class_idx < CCRegClass + 1; reg_class_idx++) {
-        auto& simple_map = renameMap[tid].renameMaps[reg_class_idx];
+        auto& simple_map = renameMap[tid]->renameMaps[reg_class_idx];
         const auto& class_snapshot = snapshot[reg_class_idx];
         
         // Restore each mapping by index

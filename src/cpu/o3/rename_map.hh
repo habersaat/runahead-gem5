@@ -178,6 +178,9 @@ class UnifiedRenameMap
      */
     PhysRegFile *regFile;
 
+    // Friend class for runahead checkpoint/restore
+    friend class Rename;
+
   public:
 
     typedef SimpleRenameMap::RenameInfo RenameInfo;
