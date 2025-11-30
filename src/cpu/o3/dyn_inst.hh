@@ -187,6 +187,8 @@ class DynInst : public ExecContext, public RefCounted
         ReqMade,
         MemOpDone,
         HtmFromTransaction,
+        InRunahead,              // Instruction is executing in runahead mode
+        RunaheadPoisoned,        // Load result is poisoned (missed in runahead)
         MaxFlags
     };
 
@@ -927,6 +929,12 @@ class DynInst : public ExecContext, public RefCounted
     /** Is this instruction's memory access strictly ordered? */
     bool strictlyOrdered() const { return instFlags[IsStrictlyOrdered]; }
     void strictlyOrdered(bool so) { instFlags[IsStrictlyOrdered] = so; }
+
+    /** Runahead execution flags */
+    bool inRunahead() const { return instFlags[InRunahead]; }
+    void inRunahead(bool f) { instFlags[InRunahead] = f; }
+    bool isRunaheadPoisoned() const { return instFlags[RunaheadPoisoned]; }
+    void setRunaheadPoisoned(bool f) { instFlags[RunaheadPoisoned] = f; }
 
     /** Has this instruction generated a memory request. */
     bool hasRequest() const { return instFlags[ReqMade]; }

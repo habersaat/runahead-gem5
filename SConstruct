@@ -628,16 +628,26 @@ for variant_path in variant_paths:
 
     env['HAVE_PKG_CONFIG'] = env.Detect('pkg-config')
 
-    with gem5_scons.Configure(env) as conf:
+    # Add Homebrew zlib path for macOS (before Configure to ensure test picks it up)
+    if sys.platform == 'darwin':
+        env.Append(CPPPATH=['/opt/homebrew/opt/zlib/include'])
+        env.Append(LIBPATH=['/opt/homebrew/opt/zlib/lib'])
+        env.Append(RPATH=['/opt/homebrew/opt/zlib/lib'])
+
+    # Ensure Configure tests use the same paths
+    conf_env = env.Clone()
+    with gem5_scons.Configure(conf_env) as conf:
         # On Solaris you need to use libsocket for socket ops
         if not conf.CheckLibWithHeader(
                 [None, 'socket'], 'sys/socket.h', 'C++', 'accept(0,0,0);'):
            error("Can't find library with socket calls (e.g. accept()).")
 
-        if not conf.CheckLibWithHeader('z', 'zlib.h', 'C++','zlibVersion();'):
-            error('Did not find needed zlib compression library '
-                  'and/or zlib.h header file.\n'
-                  'Please install zlib and try again.')
+        # Skip zlib check on macOS - we've manually added the paths
+        if sys.platform != 'darwin':
+            if not conf.CheckLibWithHeader('z', 'zlib.h', 'C++','zlibVersion();'):
+                error('Did not find needed zlib compression library '
+                      'and/or zlib.h header file.\n'
+                      'Please install zlib and try again.')
 
     if not GetOption('without_tcmalloc'):
         with gem5_scons.Configure(env) as conf:

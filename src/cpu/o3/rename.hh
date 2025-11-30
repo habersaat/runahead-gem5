@@ -198,6 +198,11 @@ class Rename
     /** Debugging function used to dump history buffer of renamings. */
     void dumpHistory();
 
+    /** Runahead: Checkpoint and restore rename map */
+    std::vector<std::vector<PhysRegIdPtr>> checkpointRenameMap(ThreadID tid);
+    void restoreRenameMap(ThreadID tid, 
+                         const std::vector<std::vector<PhysRegIdPtr>>& snapshot);
+
   private:
     /** Reset this pipeline stage */
     void resetStage();

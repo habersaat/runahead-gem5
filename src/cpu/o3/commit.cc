@@ -63,6 +63,7 @@
 #include "debug/ExecFaulting.hh"
 #include "debug/HtmCpu.hh"
 #include "debug/O3PipeView.hh"
+#include "debug/Runahead.hh"
 #include "params/BaseO3CPU.hh"
 #include "sim/faults.hh"
 #include "sim/full_system.hh"
@@ -966,6 +967,30 @@ Commit::commitInsts()
             changedROBNumEntries[tid] = true;
         } else {
             set(pc[tid], head_inst->pcState());
+
+            // Runahead: Check if we need to exit runahead mode
+            if (cpu->inRunahead(tid)) {
+                // Check if anchor instruction is being committed
+                if (head_inst->seqNum == cpu->runaheadAnchorSeqNum(tid)) {
+                    DPRINTF(Runahead, "[tid:%d] Anchor [sn:%llu] committing, exit runahead\n",
+                            tid, head_inst->seqNum);
+                    cpu->exitRunahead(tid, "anchor committed");
+                }
+                // Check if budget exhausted
+                else if (cpu->raBudget[tid] <= 0) {
+                    DPRINTF(Runahead, "[tid:%d] Budget exhausted, exit runahead\n", tid);
+                    cpu->exitRunahead(tid, "budget exhausted");
+                }
+                // Pseudo-retire runahead instructions
+                else if (head_inst->inRunahead()) {
+                    DPRINTF(Runahead, "[tid:%d] Pseudo-retiring instruction [sn:%llu]\n",
+                            tid, head_inst->seqNum);
+                    cpu->cpuStats.pseudoRetiredInsts[tid]++;
+                    cpu->raBudget[tid]--;
+                    rob->retireHead(tid);
+                    continue;
+                }
+            }
 
             // Try to commit the head instruction.
             bool commit_success = commitHead(head_inst, num_committed);

@@ -80,3 +80,4 @@ if not env['CONF']['USE_NULL_ISA']:
     # For backwards compatibility
     SimObject('O3CPU.py', sim_objects=[])
     SimObject('O3Checker.py', sim_objects=[])
+DebugFlag('Runahead', 'Runahead execution mode')

@@ -54,6 +54,7 @@
 #include "debug/Drain.hh"
 #include "debug/O3CPU.hh"
 #include "debug/Quiesce.hh"
+#include "debug/Runahead.hh"
 #include "enums/MemoryMode.hh"
 #include "sim/cur_tick.hh"
 #include "sim/full_system.hh"
@@ -328,7 +329,15 @@ CPU::CPUStats::CPUStats(CPU *cpu)
                "to idling"),
       ADD_STAT(quiesceCycles, statistics::units::Cycle::get(),
                "Total number of cycles that CPU has spent quiesced or waiting "
-               "for an interrupt")
+               "for an interrupt"),
+      ADD_STAT(runaheadPeriods, statistics::units::Count::get(),
+               "Number of runahead periods entered"),
+      ADD_STAT(pseudoRetiredInsts, statistics::units::Count::get(),
+               "Number of instructions pseudo-retired in runahead"),
+      ADD_STAT(raExitAnchor, statistics::units::Count::get(),
+               "Number of runahead exits due to anchor commit"),
+      ADD_STAT(raExitBudget, statistics::units::Count::get(),
+               "Number of runahead exits due to budget exhaustion")
 {
     // Register any of the O3CPU's stats here.
     timesIdled
@@ -339,6 +348,18 @@ CPU::CPUStats::CPUStats(CPU *cpu)
 
     quiesceCycles
         .prereq(quiesceCycles);
+    
+    pseudoRetiredInsts
+        .init(cpu->numThreads)
+        .flags(statistics::total);
+    
+    raExitAnchor
+        .init(cpu->numThreads)
+        .flags(statistics::total);
+    
+    raExitBudget
+        .init(cpu->numThreads)
+        .flags(statistics::total);
 }
 
 void
@@ -1422,6 +1443,72 @@ CPU::exitThreads()
             it++;
         }
     }
+}
+
+void
+CPU::enterRunahead(ThreadID tid, InstSeqNum anchor_sn)
+{
+    if (_inRunahead[tid]) {
+        DPRINTF(Runahead, "[tid:%d] Already in runahead mode\n", tid);
+        return;
+    }
+
+    DPRINTF(Runahead, "[tid:%d] Entering runahead mode (anchor sn:%llu)\n",
+            tid, anchor_sn);
+
+    // Checkpoint state
+    raCkpt[tid].pc = std::unique_ptr<PCStateBase>(pcState(tid).clone());
+    raCkpt[tid].valid = true;
+    raCkpt[tid].renameMapSnapshot = rename.checkpointRenameMap(tid);
+    raCkpt[tid].freeListSnapshot = freeList.checkpoint();
+
+    // Set runahead state
+    _inRunahead[tid] = true;
+    raAnchorSeqNum[tid] = anchor_sn;
+    raBudget[tid] = raDefaultBudget;
+
+    // Update stats
+    cpuStats.runaheadPeriods++;
+}
+
+void
+CPU::exitRunahead(ThreadID tid, const char *reason)
+{
+    if (!_inRunahead[tid]) {
+        return;
+    }
+
+    DPRINTF(Runahead, "[tid:%d] Exiting runahead mode: %s\n", tid, reason);
+
+    // Update exit reason stats
+    if (std::string(reason).find("anchor") != std::string::npos) {
+        cpuStats.raExitAnchor[tid]++;
+    } else if (std::string(reason).find("budget") != std::string::npos) {
+        cpuStats.raExitBudget[tid]++;
+    }
+
+    // Restore architectural state
+    if (raCkpt[tid].valid) {
+        // Restore PC
+        set(pcState(tid), *raCkpt[tid].pc);
+
+        // Restore rename map and free list
+        rename.restoreRenameMap(tid, raCkpt[tid].renameMapSnapshot);
+        freeList.restore(raCkpt[tid].freeListSnapshot);
+
+        // Clear checkpoint
+        raCkpt[tid].renameMapSnapshot.clear();
+        raCkpt[tid].freeListSnapshot.clear();
+        raCkpt[tid].valid = false;
+    }
+
+    // Squash pipeline from runahead anchor
+    squashFromTC(tid);
+
+    // Clear runahead state
+    _inRunahead[tid] = false;
+    raAnchorSeqNum[tid] = 0;
+    raBudget[tid] = 0;
 }
 
 void

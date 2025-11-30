@@ -56,6 +56,7 @@
 #include "debug/Drain.hh"
 #include "debug/IEW.hh"
 #include "debug/O3PipeView.hh"
+#include "debug/Runahead.hh"
 #include "params/BaseO3CPU.hh"
 
 namespace gem5
@@ -1127,6 +1128,19 @@ IEW::executeInsts()
         // Notify potential listeners that this instruction has started
         // executing
         ppExecute->notify(inst);
+
+        // Runahead: Propagate poison to dependent instructions
+        if (inst->inRunahead() && !inst->isRunaheadPoisoned()) {
+            // Check if any source registers are poisoned (not ready means potentially poisoned)
+            for (int src_idx = 0; src_idx < inst->numSrcRegs(); src_idx++) {
+                if (!inst->readySrcIdx(src_idx)) {
+                    inst->setRunaheadPoisoned(true);
+                    DPRINTF(Runahead, "[tid:%d] Propagating poison to [sn:%llu]\n",
+                            inst->threadNumber, inst->seqNum);
+                    break;
+                }
+            }
+        }
 
         // Check if the instruction is squashed; if so then skip it
         if (inst->isSquashed()) {

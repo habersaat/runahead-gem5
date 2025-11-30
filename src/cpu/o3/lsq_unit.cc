@@ -51,6 +51,7 @@
 #include "debug/HtmCpu.hh"
 #include "debug/IEW.hh"
 #include "debug/LSQUnit.hh"
+#include "debug/Runahead.hh"
 #include "debug/O3PipeView.hh"
 #include "mem/packet.hh"
 #include "mem/request.hh"
@@ -161,6 +162,14 @@ LSQUnit::completeDataAccess(PacketPtr pkt)
     }
 
     cpu->ppDataAccessComplete->notify(std::make_pair(inst, pkt));
+
+    // Runahead: Poison loads that miss in cache during runahead
+    if (inst->inRunahead() && inst->isLoad() && !pkt->req->isUncacheable()) {
+        // If the request went to memory (not satisfied by cache), poison it
+        inst->setRunaheadPoisoned(true);
+        DPRINTF(Runahead, "[tid:%d] Poisoning runahead load [sn:%llu] (cache miss)\n",
+                lsqID, inst->seqNum);
+    }
 
     assert(!cpu->switchedOut());
     if (!inst->isSquashed()) {
@@ -804,6 +813,14 @@ LSQUnit::writebackStores()
             DPRINTF(LSQUnit, "Unable to write back any more stores, cache"
                     " is blocked!\n");
             break;
+        }
+
+        // Runahead: Suppress stores in runahead mode
+        if (storeWBIt->instruction()->inRunahead()) {
+            DPRINTF(Runahead, "[tid:%d] Suppressing runahead store [sn:%llu]\n",
+                    lsqID, storeWBIt->instruction()->seqNum);
+            completeStore(storeWBIt++);
+            continue;
         }
 
         // Store didn't write any data so no need to write it back to

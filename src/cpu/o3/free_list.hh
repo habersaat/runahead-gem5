@@ -105,6 +105,29 @@ class SimpleFreeList
 
     /** True iff there are free registers on the list. */
     bool hasFreeRegs() const { return !freeRegs.empty(); }
+
+    /** Runahead: Checkpoint free list */
+    std::vector<PhysRegIdPtr> checkpoint() const
+    {
+        std::vector<PhysRegIdPtr> snapshot;
+        std::queue<PhysRegIdPtr> temp = freeRegs;
+        while (!temp.empty()) {
+            snapshot.push_back(temp.front());
+            temp.pop();
+        }
+        return snapshot;
+    }
+
+    /** Runahead: Restore free list */
+    void restore(const std::vector<PhysRegIdPtr>& snapshot)
+    {
+        while (!freeRegs.empty()) {
+            freeRegs.pop();
+        }
+        for (auto reg : snapshot) {
+            freeRegs.push(reg);
+        }
+    }
 };
 
 
@@ -188,6 +211,24 @@ class UnifiedFreeList
     numFreeRegs(RegClassType type) const
     {
         return freeLists[type].numFreeRegs();
+    }
+
+    /** Runahead: Checkpoint all free lists */
+    std::vector<std::vector<PhysRegIdPtr>> checkpoint() const
+    {
+        std::vector<std::vector<PhysRegIdPtr>> snapshot;
+        for (int i = 0; i < CCRegClass + 1; i++) {
+            snapshot.push_back(freeLists[i].checkpoint());
+        }
+        return snapshot;
+    }
+
+    /** Runahead: Restore all free lists */
+    void restore(const std::vector<std::vector<PhysRegIdPtr>>& snapshot)
+    {
+        for (int i = 0; i < snapshot.size() && i < CCRegClass + 1; i++) {
+            freeLists[i].restore(snapshot[i]);
+        }
     }
 };
 

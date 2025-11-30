@@ -50,6 +50,7 @@
 #include "debug/Activity.hh"
 #include "debug/O3PipeView.hh"
 #include "debug/Rename.hh"
+#include "debug/Runahead.hh"
 #include "params/BaseO3CPU.hh"
 
 namespace gem5
@@ -656,6 +657,13 @@ Rename::renameInsts(ThreadID tid)
                 "[tid:%i] "
                 "Processing instruction [sn:%llu] with PC %s.\n",
                 tid, inst->seqNum, inst->pcState());
+
+        // Mark instruction if in runahead mode
+        if (cpu->inRunahead(tid)) {
+            inst->inRunahead(true);
+            DPRINTF(Runahead, "[tid:%d] Marked instruction [sn:%llu] as runahead\n",
+                    tid, inst->seqNum);
+        }
 
         // Check here to make sure there are enough destination registers
         // to rename to.  Otherwise block.
@@ -1428,6 +1436,43 @@ Rename::dumpHistory()
                     (*buf_it).prevPhysReg->className());
 
             buf_it++;
+        }
+    }
+}
+
+std::vector<std::vector<PhysRegIdPtr>>
+Rename::checkpointRenameMap(ThreadID tid)
+{
+    std::vector<std::vector<PhysRegIdPtr>> snapshot;
+    
+    for (int reg_class_idx = 0; reg_class_idx < CCRegClass + 1; reg_class_idx++) {
+        RegClassType reg_class = (RegClassType)reg_class_idx;
+        int num_arch_regs = renameMap[tid].numArchRegs(reg_class);
+        std::vector<PhysRegIdPtr> class_snapshot;
+        
+        for (int arch_reg = 0; arch_reg < num_arch_regs; arch_reg++) {
+            RegId arch_reg_id(reg_class, arch_reg);
+            PhysRegIdPtr phys_reg = renameMap[tid].lookup(arch_reg_id);
+            class_snapshot.push_back(phys_reg);
+        }
+        
+        snapshot.push_back(class_snapshot);
+    }
+    
+    return snapshot;
+}
+
+void
+Rename::restoreRenameMap(ThreadID tid, 
+                        const std::vector<std::vector<PhysRegIdPtr>>& snapshot)
+{
+    for (int reg_class_idx = 0; reg_class_idx < snapshot.size(); reg_class_idx++) {
+        RegClassType reg_class = (RegClassType)reg_class_idx;
+        
+        for (int arch_reg = 0; arch_reg < snapshot[reg_class_idx].size(); arch_reg++) {
+            RegId arch_reg_id(reg_class, arch_reg);
+            PhysRegIdPtr phys_reg = snapshot[reg_class_idx][arch_reg];
+            renameMap[tid].setEntry(arch_reg_id, phys_reg);
         }
     }
 }
