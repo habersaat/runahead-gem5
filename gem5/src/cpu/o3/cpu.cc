@@ -327,7 +327,7 @@ CPU::enterRunahead(ThreadID tid)
     if (!enableRunahead || _inRunahead[tid] || isDraining()) return;
 
     // Save the current PC for this thread so we can restore when exiting runahead.
-    raCkpt[tid].pc = pcState(tid).clone();
+    raCkpt[tid].pc = std::unique_ptr<PCStateBase>(pcState(tid).clone());
     raCkpt[tid].valid = true;
 
     // Checkpoint rename map state (architectural-to-physical register mappings)
@@ -564,19 +564,7 @@ CPU::CPUStats::CPUStats(CPU *cpu)
 
     // runahead
     runaheadCycles.prereq(runaheadCycles);
-    realCycles.prereq(realCycles);
-
-    pseudoRetiredInsts
-        .init(cpu->numThreads)
-        .flags(statistics::total);
-
-    raExitAnchor
-        .init(cpu->numThreads)
-        .flags(statistics::total);
-
-    raExitBudget
-        .init(cpu->numThreads)
-        .flags(statistics::total);
+    runaheadPeriods.prereq(runaheadPeriods);
 }
 
 void
