@@ -562,8 +562,8 @@ class CPU : public BaseCPU
     int raDefaultBudget = 1000;
     InstSeqNum raAnchorSeqNum[MaxThreads] = {0};
 
-     // NEW: last dynamic anchor we used runahead for on this thread
-    std::vector<InstSeqNum> lastRunaheadAnchorSeqNum;
+     // NEW:
+    std::vector<Addr> lastRunaheadAnchorPC; // size = numThreads
 
     /** Runahead mode control */
     void enterRunahead(ThreadID tid, InstSeqNum anchor_sn);

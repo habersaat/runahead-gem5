@@ -970,6 +970,8 @@ Commit::commitInsts()
                 break;
             }
 
+            Addr anchor_pc = head_inst->pcState().instAddr();
+
             // Only allow entering runahead on fault-free
             // loads with outstanding mem requests
             if (!rob->isHeadReady(tid) &&
@@ -978,14 +980,27 @@ Commit::commitInsts()
                 head_inst->getFault() == NoFault &&
                 head_inst->isLoad() &&
                 head_inst->hasRequest() &&
-                head_inst->seqNum != cpu->lastRunaheadAnchorSeqNum[tid])
+                anchor_pc != cpu->lastRunaheadAnchorPC[tid])
             {
                 DPRINTF(Runahead,
                     "[tid:%d] Head load stall; entering runahead at sn:%llu\n",
                     tid, head_inst->seqNum);
 
                 cpu->enterRunahead(tid, head_inst->seqNum);
-                cpu->lastRunaheadAnchorSeqNum[tid] = head_inst->seqNum;
+                cpu->lastRunaheadAnchorPC[tid] = anchor_pc;
+            }
+            else if (!rob->isHeadReady(tid) &&
+                 cpu->enableRunahead &&
+                 !cpu->inRunahead(tid) &&
+                 head_inst->isLoad() &&
+                 head_inst->hasRequest() &&
+                 anchor_pc == cpu->lastRunaheadAnchorPC[tid])
+            {
+
+    DPRINTF(Runahead,
+"[tid:%d] Head ld stall at sn:%llu but we already ran ahead for "
+        "this PC; falling back to normal stall\n",
+        tid, head_inst->seqNum);
             }
 
             // Either we entered runahead or we stall commit here

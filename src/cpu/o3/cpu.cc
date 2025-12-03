@@ -302,9 +302,9 @@ CPU::CPU(const BaseO3CPUParams &params)
     }
 
     // NEW:
-    lastRunaheadAnchorSeqNum.resize(numThreads);
+    lastRunaheadAnchorPC.resize(numThreads);
     for (ThreadID tid = 0; tid < numThreads; ++tid) {
-        lastRunaheadAnchorSeqNum[tid] = 0;
+        lastRunaheadAnchorPC[tid] = (InstSeqNum)(-1);
     }
 }
 
