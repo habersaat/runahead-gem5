@@ -937,14 +937,61 @@ Commit::commitInsts()
 
         // ThreadID commit_thread = getCommittingThread();
 
-        if (commit_thread == -1 || !rob->isHeadReady(commit_thread))
+        if (commit_thread == -1 || commit_thread == InvalidThreadID)
             break;
 
+        // head_inst = rob->readHeadInst(commit_thread);
+        // *** FIX 2: get the head safely ***
         head_inst = rob->readHeadInst(commit_thread);
+        if (!head_inst) {
+            DPRINTF(Commit,
+                "[tid:%d] ROB head is null, nothing to commit this cycle\n",
+                commit_thread);
+            break;
+        }
 
         ThreadID tid = head_inst->threadNumber;
 
         assert(tid == commit_thread);
+
+        // ===== Runahead trigger: head of ROB not ready
+        // and looks like an outstanding load miss =====
+        if (!rob->isHeadReady(tid)) {
+            DPRINTF(Commit,
+                "[tid:%d] Head of ROB not ready at sn:%llu (PC %s)\n",
+                tid, head_inst->seqNum, head_inst->pcState());
+
+            // Skip redundant runahead entries on the same anchor
+            if (cpu->inRunahead(tid) &&
+                cpu->runaheadAnchorSeqNum(tid) == head_inst->seqNum) {
+                DPRINTF(Runahead,
+                    "[tid:%d] Already in runahead for anchor sn:%llu\n",
+                    tid, head_inst->seqNum);
+                break;
+            }
+
+            // Only allow entering runahead on fault-free
+            // loads with outstanding mem requests
+            if (!rob->isHeadReady(tid) &&
+                cpu->enableRunahead &&
+                !cpu->inRunahead(tid) &&
+                head_inst->getFault() == NoFault &&
+                head_inst->isLoad() &&
+                head_inst->hasRequest() &&
+                head_inst->seqNum != cpu->lastRunaheadAnchorSeqNum[tid])
+            {
+                DPRINTF(Runahead,
+                    "[tid:%d] Head load stall; entering runahead at sn:%llu\n",
+                    tid, head_inst->seqNum);
+
+                cpu->enterRunahead(tid, head_inst->seqNum);
+                cpu->lastRunaheadAnchorSeqNum[tid] = head_inst->seqNum;
+            }
+
+            // Either we entered runahead or we stall commit here
+            break;
+        }
+        // ======================================
 
         DPRINTF(Commit,
                 "Trying to commit head instruction, [tid:%i] [sn:%llu]\n",
@@ -971,11 +1018,59 @@ Commit::commitInsts()
             // Runahead: Check if we need to exit runahead mode
             if (cpu->inRunahead(tid)) {
                 // Check if anchor instruction is being committed
+
                 if (head_inst->seqNum == cpu->runaheadAnchorSeqNum(tid)) {
-                    DPRINTF(Runahead, "[tid:%d] Anchor [sn:%llu] committing, exit runahead\n",
+                    Fault f = head_inst->getFault();
+
+                    if (f != NoFault) {
+                        // Anchor faulted while in runahead:
+                        // treat as "bad runahead
+                        DPRINTF(Runahead,
+                       "[tid:%d] Anchor [sn:%llu] fault %s during runahead; "
+                            "exiting runahead and discarding anchor\n",
+                            tid, head_inst->seqNum, f->name());
+
+                        // Exit runahead (restore checkpoint +
+                        // squash pipeline)
+                        cpu->exitRunahead(tid, "anchor fault");
+
+                        // Throw away this anchor instead
+                        // of committing/faulting it
+                        head_inst->setSquashed();
+                        rob->retireHead(tid);
+                        ++stats.commitSquashedInsts;
+                        ppSquash->notify(head_inst);
+                        changedROBNumEntries[tid] = true;
+
+                        // Do not reach commitHead() this cycle
+                        break;
+                    }
+
+                    DPRINTF(Runahead,
+                    "[tid:%d] Anchor [sn:%llu] reached head; exiting runahead "
+                        "and restarting from checkpoint\n",
+                        tid, head_inst->seqNum);
+
+                    // Exit runahead: restore checkpoint + squash pipeline.
+                    cpu->exitRunahead(tid, "anchor reached");
+
+                    // Do NOT commit this instruction in the same cycle.
+                    // After the squash, we will re-fetch
+                    // and re-execute from the
+                    // checkpointed PC, and eventually
+                    // this instruction will reappear
+                    // as a normal (non-runahead) head
+                    // and commit in the usual way.
+                    break;
+                }
+
+                /* if (head_inst->seqNum == cpu->runaheadAnchorSeqNum(tid)) {
+                    DPRINTF(Runahead,
+                    "[tid:%d] Anchor [sn:%llu] committing, exit runahead\n",
                             tid, head_inst->seqNum);
                     cpu->exitRunahead(tid, "anchor committed");
-                }
+                } */
+
                 // Check if budget exhausted
                 else if (cpu->raBudget[tid] <= 0) {
                     DPRINTF(Runahead, "[tid:%d] Budget exhausted, exit runahead\n", tid);
@@ -1066,6 +1161,20 @@ Commit::commitInsts()
                         drainImminent = true;
                     }
                 }
+
+                // ==================
+                // If a TC squash or trap is pending, don't run PC
+                // events this cycle.
+                // This can happen when exiting runahead
+                // (we generate a TC squash).
+                if (thread[tid]->noSquashFromTC || thread[tid]->trapPending) {
+                    DPRINTF(Commit,
+                            "[tid:%d] TC squash/trap pending after commit; "
+                            "skipping PC events this cycle\n",
+                            tid);
+                    break;
+                }
+                // =================
 
                 bool onInstBoundary = !head_inst->isMicroop() ||
                                       head_inst->isLastMicroop() ||
@@ -1213,6 +1322,18 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
         if (cpu->checker) {
             // Need to check the instruction before its fault is processed
             cpu->checker->verify(head_inst);
+        }
+
+        // Runahead / TC interaction:
+        // If we're here with noSquashFromTC already set (e.g., due to a
+        // prior TC squash from runahead exit), clear it so this trap can
+        // take ownership of the TC squash state.
+        if (thread[tid]->noSquashFromTC) {
+            DPRINTF(Commit,
+                    "[tid:%d] noSquashFromTC already set before fault; "
+                    "clearing and proceeding (likely runahead exit)\n",
+                    tid);
+            thread[tid]->noSquashFromTC = false;
         }
 
         assert(!thread[tid]->noSquashFromTC);

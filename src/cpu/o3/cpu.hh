@@ -549,18 +549,22 @@ class CPU : public BaseCPU
     {
         std::unique_ptr<PCStateBase> pc;
         bool valid = false;
+
         std::vector<std::vector<PhysRegIdPtr>> renameMapSnapshot;
         std::vector<std::vector<PhysRegIdPtr>> freeListSnapshot;
     };
     std::array<RunaheadCkpt, MaxThreads> raCkpt;
-    
+
     /** Runahead configuration and state */
     bool enableRunahead = true;
     bool _inRunahead[MaxThreads] = {false};
     int raBudget[MaxThreads] = {0};
     int raDefaultBudget = 1000;
     InstSeqNum raAnchorSeqNum[MaxThreads] = {0};
-    
+
+     // NEW: last dynamic anchor we used runahead for on this thread
+    std::vector<InstSeqNum> lastRunaheadAnchorSeqNum;
+
     /** Runahead mode control */
     void enterRunahead(ThreadID tid, InstSeqNum anchor_sn);
     void exitRunahead(ThreadID tid, const char *reason);
@@ -604,7 +608,7 @@ class CPU : public BaseCPU
         /** Stat for total number of cycles the CPU spends descheduled due to a
          * quiesce operation or waiting for an interrupt. */
         statistics::Scalar quiesceCycles;
-        
+
         /** Runahead execution stats */
         statistics::Scalar runaheadPeriods;
         statistics::Vector pseudoRetiredInsts;

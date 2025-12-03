@@ -300,6 +300,12 @@ CPU::CPU(const BaseO3CPUParams &params)
         fatal("O3CPU %s has no interrupt controller.\n"
               "Ensure createInterruptController() is called.\n", name());
     }
+
+    // NEW:
+    lastRunaheadAnchorSeqNum.resize(numThreads);
+    for (ThreadID tid = 0; tid < numThreads; ++tid) {
+        lastRunaheadAnchorSeqNum[tid] = 0;
+    }
 }
 
 void
@@ -348,15 +354,15 @@ CPU::CPUStats::CPUStats(CPU *cpu)
 
     quiesceCycles
         .prereq(quiesceCycles);
-    
+
     pseudoRetiredInsts
         .init(cpu->numThreads)
         .flags(statistics::total);
-    
+
     raExitAnchor
         .init(cpu->numThreads)
         .flags(statistics::total);
-    
+
     raExitBudget
         .init(cpu->numThreads)
         .flags(statistics::total);
@@ -1488,8 +1494,9 @@ CPU::exitRunahead(ThreadID tid, const char *reason)
     }
 
     // Restore architectural state
-    if (raCkpt[tid].valid) {
+    if (raCkpt[tid].valid && raCkpt[tid].pc) {
         // Restore PC
+        //set(pcState(tid), *raCkpt[tid].pc);
         pcState(*raCkpt[tid].pc, tid);
 
         // Restore rename map and free list
@@ -1499,8 +1506,12 @@ CPU::exitRunahead(ThreadID tid, const char *reason)
         // Clear checkpoint
         raCkpt[tid].renameMapSnapshot.clear();
         raCkpt[tid].freeListSnapshot.clear();
+        raCkpt[tid].pc.reset(); // ==== I ADDED ====
         raCkpt[tid].valid = false;
     }
+
+    // Fix dependency graph after restore
+    iew.squash(tid);
 
     // Squash pipeline from runahead anchor
     squashFromTC(tid);

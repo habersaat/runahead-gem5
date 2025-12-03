@@ -192,6 +192,7 @@ main = Environment(tools=[
         ConfigFile, AddLocalRPATH, SwitchingHeaders, TagImpliesTool, Blob
     ])
 
+main.Append(LIBS=['z'])
 main.Tool(SCons.Tool.FindTool(['gcc', 'clang'], main))
 main.Tool(SCons.Tool.FindTool(['g++', 'clang++'], main))
 
