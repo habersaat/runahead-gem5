@@ -343,7 +343,9 @@ CPU::CPUStats::CPUStats(CPU *cpu)
       ADD_STAT(raExitAnchor, statistics::units::Count::get(),
                "Number of runahead exits due to anchor commit"),
       ADD_STAT(raExitBudget, statistics::units::Count::get(),
-               "Number of runahead exits due to budget exhaustion")
+               "Number of runahead exits due to budget exhaustion"),
+      ADD_STAT(raExitRobEmpty, statistics::units::Count::get(),
+               "Number of runahead exits due to ROB empty")
 {
     // Register any of the O3CPU's stats here.
     timesIdled
@@ -1467,6 +1469,8 @@ CPU::enterRunahead(ThreadID tid, InstSeqNum anchor_sn)
     raCkpt[tid].valid = true;
     raCkpt[tid].renameMapSnapshot = rename.checkpointRenameMap(tid);
     raCkpt[tid].freeListSnapshot = freeList.checkpoint();
+    raCkpt[tid].scoreboardSnapshot = scoreboard.checkpoint();
+    raCkpt[tid].iqScoreboardSnapshot = iew.instQueue.checkpointScoreboard();
 
     // Set runahead state
     _inRunahead[tid] = true;
@@ -1491,13 +1495,13 @@ CPU::exitRunahead(ThreadID tid, const char *reason)
     } else if (reason
         && std::string(reason).find("budget") != std::string::npos) {
         cpuStats.raExitBudget[tid]++;
+    } else if (reason && std::string(reason).find("rob_empty")
+                    != std::string::npos) {
+        cpuStats.raExitRobEmpty++;
     }
 
-    // 1) Flush pipeline / speculative state first
-    // This will squash ROB/IEW/LSQ/rename state for this thread.
-    squashFromTC(tid);
-
-    // 2) Restore architectural state from checkpoint
+    // 1) Restore architectural state from checkpoint FIRST
+    //    (before squash, so squash uses correct PC)
     if (raCkpt[tid].valid && raCkpt[tid].pc) {
         // Restore PC for this thread
         pcState(*raCkpt[tid].pc, tid);
@@ -1506,17 +1510,35 @@ CPU::exitRunahead(ThreadID tid, const char *reason)
         rename.restoreRenameMap(tid, raCkpt[tid].renameMapSnapshot);
         freeList.restore(raCkpt[tid].freeListSnapshot);
 
+        // Restore scoreboard state
+        scoreboard.restore(raCkpt[tid].scoreboardSnapshot);
+        iew.instQueue.restoreScoreboard(raCkpt[tid].iqScoreboardSnapshot);
+        iew.instQueue.resetDependencyState();
+
+        DPRINTF(Runahead, "[tid:%d] Restored checkpoint PC: %s\n",
+                tid, raCkpt[tid].pc->instAddr());
+
         // Clear checkpoint
         raCkpt[tid].renameMapSnapshot.clear();
         raCkpt[tid].freeListSnapshot.clear();
+        raCkpt[tid].scoreboardSnapshot.clear();
+        raCkpt[tid].iqScoreboardSnapshot.clear();
         raCkpt[tid].pc.reset();
         raCkpt[tid].valid = false;
     }
 
-    // 3) Clear runahead state
+    // 2) Set squash point to anchor seqnum - 1
+    //    This ensures we squash the anchor and everything younger
+    raSquashSeqNum[tid] = raAnchorSeqNum[tid] - 1;
+
+    // 3) Clear runahead state BEFORE squash
+    //    (so squashed instructions don't think we're still in runahead)
     _inRunahead[tid] = false;
     raAnchorSeqNum[tid] = 0;
     raBudget[tid] = 0;
+
+    // 4) Now squash pipeline from restored PC
+    squashFromTC(tid);
 }
 
 void

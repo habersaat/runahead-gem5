@@ -125,6 +125,19 @@ class Scoreboard
         regScoreBoard[phys_reg->flatIndex()] = false;
     }
 
+    /** Checkpoint the scoreboard state for runahead. */
+    std::vector<bool> checkpoint() const
+    {
+        return regScoreBoard;
+    }
+
+    /** Restore the scoreboard state from a checkpoint. */
+    void restore(const std::vector<bool>& snapshot)
+    {
+        assert(snapshot.size() == regScoreBoard.size());
+        regScoreBoard = snapshot;
+    }
+
 };
 
 } // namespace o3

@@ -108,6 +108,30 @@ LSQUnit::completeDataAccess(PacketPtr pkt)
     LSQRequest *request = dynamic_cast<LSQRequest *>(pkt->senderState);
     DynInstPtr inst = request->instruction();
 
+    // ===== Runahead: Check if this is the anchor load completing =====
+    if (cpu->inRunahead(inst->threadNumber) &&
+        inst->seqNum == cpu->runaheadAnchorSeqNum(inst->threadNumber))
+    {
+        DPRINTF(Runahead,
+            "[tid:%d] Anchor load [sn:%llu] completed in memory; "
+            "exiting runahead\n",
+            inst->threadNumber, inst->seqNum);
+        cpu->exitRunahead(inst->threadNumber, "anchor_completed");
+        return;
+    }
+
+    // ===== Runahead: Discard stale runahead load completions =====
+    // If this instruction was from a runahead period that has already ended,
+    // discard the completion entirely - don't wake dependents or writeback.
+    if (inst->inRunahead() && !cpu->inRunahead(inst->threadNumber)) {
+        DPRINTF(Runahead,
+            "[tid:%d] Discarding stale runahead load [sn:%llu] "
+            "(runahead already exited)\n",
+            inst->threadNumber, inst->seqNum);
+        return;
+    }
+    // ==================================================================
+
     // hardware transactional memory
     // sanity check
     if (pkt->isHtmTransactional() && !inst->isSquashed()) {

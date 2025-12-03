@@ -552,6 +552,8 @@ class CPU : public BaseCPU
 
         std::vector<std::vector<PhysRegIdPtr>> renameMapSnapshot;
         std::vector<std::vector<PhysRegIdPtr>> freeListSnapshot;
+        std::vector<bool> scoreboardSnapshot;
+        std::vector<bool> iqScoreboardSnapshot;
     };
     std::array<RunaheadCkpt, MaxThreads> raCkpt;
 
@@ -561,6 +563,7 @@ class CPU : public BaseCPU
     int raBudget[MaxThreads] = {0};
     int raDefaultBudget = 100;
     InstSeqNum raAnchorSeqNum[MaxThreads] = {0};
+    InstSeqNum raSquashSeqNum[MaxThreads] = {0};
 
      // NEW:
     std::vector<Addr> lastRunaheadAnchorPC; // size = numThreads
@@ -614,6 +617,7 @@ class CPU : public BaseCPU
         statistics::Vector pseudoRetiredInsts;
         statistics::Vector raExitAnchor;
         statistics::Vector raExitBudget;
+        statistics::Scalar raExitRobEmpty;
     } cpuStats;
 
   public:

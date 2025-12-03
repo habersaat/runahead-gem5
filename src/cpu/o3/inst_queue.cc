@@ -1324,6 +1324,12 @@ InstructionQueue::doSquash(ThreadID tid)
     }
 }
 
+void
+InstructionQueue::resetDependencyState()
+{
+    dependGraph.reset();
+}
+
 bool
 InstructionQueue::PqCompare::operator()(
         const DynInstPtr &lhs, const DynInstPtr &rhs) const

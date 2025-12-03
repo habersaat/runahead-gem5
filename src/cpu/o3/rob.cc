@@ -243,7 +243,9 @@ ROB::retireHead(ThreadID tid)
     DynInstPtr head_inst = std::move(*head_it);
     instList[tid].erase(head_it);
 
-    assert(head_inst->readyToCommit());
+    // assert(head_inst->readyToCommit());
+    // Allow pseudo-retirement of runahead instructions even if not ready
+    assert(head_inst->readyToCommit() || head_inst->inRunahead());
 
     DPRINTF(ROB, "[tid:%i] Retiring head instruction, "
             "instruction PC %s, [sn:%llu]\n", tid, head_inst->pcState(),

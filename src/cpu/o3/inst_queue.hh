@@ -277,6 +277,22 @@ class InstructionQueue
     /** Debug function to print all instructions. */
     void printInsts();
 
+    /** Checkpoint the IQ's regScoreboard for runahead. */
+    std::vector<bool> checkpointScoreboard() const
+    {
+        return regScoreboard;
+    }
+
+    /** Restore the IQ's regScoreboard from a checkpoint. */
+    void restoreScoreboard(const std::vector<bool>& snapshot)
+    {
+        assert(snapshot.size() == regScoreboard.size());
+        regScoreboard = snapshot;
+    }
+
+    /** Reset dependency state for runahead recovery. */
+    void resetDependencyState();
+
   private:
     /** Does the actual squashing. */
     void doSquash(ThreadID tid);

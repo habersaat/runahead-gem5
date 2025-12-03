@@ -489,8 +489,28 @@ Commit::squashAll(ThreadID tid)
     // then use one older sequence number.
     // Hopefully this doesn't mess things up.  Basically I want to squash
     // all instructions of this thread.
+    InstSeqNum squashed_inst;
+
+    // Check if this is a runahead exit squash - use the stored squash point
+    if (cpu->raSquashSeqNum[tid] != 0) {
+        squashed_inst = cpu->raSquashSeqNum[tid];
+        cpu->raSquashSeqNum[tid] = 0;  // Clear after use
+        DPRINTF(Commit,
+        "[tid:%i] Runahead exit: squashing from anchor seqnum %llu\n",
+                tid, squashed_inst);
+    } else {
+        squashed_inst = rob->isEmpty(tid) ?
+            lastCommitedSeqNum[tid] : rob->readHeadInst(tid)->seqNum - 1;
+    }
+
+    /*
+    // If we want to include the squashing instruction in the squash,
+    // then use one older sequence number.
+    // Hopefully this doesn't mess things up.  Basically I want to squash
+    // all instructions of this thread.
     InstSeqNum squashed_inst = rob->isEmpty(tid) ?
         lastCommitedSeqNum[tid] : rob->readHeadInst(tid)->seqNum - 1;
+    */
 
     // All younger instructions will be squashed. Set the sequence
     // number as the youngest instruction in the ROB (0 in this case.
@@ -971,6 +991,23 @@ Commit::commitInsts()
                 "[tid:%d] Head of ROB not ready at sn:%llu (PC %s)\n",
                 tid, head_inst->seqNum, head_inst->pcState()); */
 
+            // If already in runahead, pseudo-retire this unready instruction
+            if (cpu->inRunahead(tid)) {
+                head_inst->inRunahead(true);
+                DPRINTF(Runahead,
+        "[tid:%d] Pseudo-retiring unready inst [sn:%llu] in runahead\n",
+                tid, head_inst->seqNum);
+                cpu->cpuStats.pseudoRetiredInsts[tid]++;
+                cpu->raBudget[tid]--;
+                rob->retireHead(tid);
+
+                if (cpu->raBudget[tid] <= 0) {
+                    cpu->exitRunahead(tid, "budget exhausted");
+                    break;
+                }
+            continue;
+        }
+
             bool completed   = head_inst->isCompleted();
 bool execed      = head_inst->isExecuted();
 bool canCommit   = head_inst->readyToCommit();
@@ -989,13 +1026,13 @@ DPRINTF(Commit,
     inIQ, inLSQ, isLoad, isSquashed);
 
             // Skip redundant runahead entries on the same anchor
-            if (cpu->inRunahead(tid) &&
+            /* if (cpu->inRunahead(tid) &&
                 cpu->runaheadAnchorSeqNum(tid) == head_inst->seqNum) {
                 DPRINTF(Runahead,
                     "[tid:%d] Already in runahead for anchor sn:%llu\n",
                     tid, head_inst->seqNum);
                 break;
-            }
+            } */
 
             Addr anchor_pc = head_inst->pcState().instAddr();
 
@@ -1015,6 +1052,24 @@ DPRINTF(Commit,
 
                 cpu->enterRunahead(tid, head_inst->seqNum);
                 cpu->lastRunaheadAnchorPC[tid] = anchor_pc;
+                cpu->raBudget[tid] = cpu->raDefaultBudget;
+
+                // Mark the anchor as runahead and poisoned
+                head_inst->inRunahead(true);
+                head_inst->setRunaheadPoisoned(true);
+
+                // Pseudo-retire the anchor itself so
+                // instructions behind it can flow through
+                DPRINTF(Runahead,
+                        "[tid:%i] Pseudo-retiring anchor [sn:%llu]\n",
+                        tid, head_inst->seqNum);
+                cpu->cpuStats.pseudoRetiredInsts[tid]++;
+                rob->retireHead(tid);
+
+                // Continue the loop to pseudo-retire
+                // more instructions this cycle
+                // (don't break - let the loop continue)
+                continue;
             }
             else if (!rob->isHeadReady(tid) &&
                  cpu->enableRunahead &&
@@ -1126,10 +1181,12 @@ DPRINTF(Commit,
                 else if (cpu->raBudget[tid] <= 0) {
                     DPRINTF(Runahead, "[tid:%d] Budget exhausted, exit runahead\n", tid);
                     cpu->exitRunahead(tid, "budget exhausted");
+                    break;
                 }
-                // Pseudo-retire runahead instructions
-                else if (head_inst->inRunahead()) {
-                    DPRINTF(Runahead, "[tid:%d] Pseudo-retiring instruction [sn:%llu]\n",
+                // Pseudo-retire ALL ready instructions while in runahead
+                else {
+                    DPRINTF(Runahead,
+                         "[tid:%d] Pseudo-retiring instruction [sn:%llu]\n",
                             tid, head_inst->seqNum);
                     cpu->cpuStats.pseudoRetiredInsts[tid]++;
                     cpu->raBudget[tid]--;

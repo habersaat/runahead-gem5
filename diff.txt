@@ -1,0 +1,2044 @@
+diff --git a/SConstruct b/SConstruct
+index 4fe2f64366..7ecf4918b1 100755
+--- a/SConstruct
++++ b/SConstruct
+@@ -192,6 +192,7 @@ main = Environment(tools=[
+         ConfigFile, AddLocalRPATH, SwitchingHeaders, TagImpliesTool, Blob
+     ])
+
++main.Append(LIBS=['z'])
+ main.Tool(SCons.Tool.FindTool(['gcc', 'clang'], main))
+ main.Tool(SCons.Tool.FindTool(['g++', 'clang++'], main))
+
+@@ -628,16 +629,26 @@ for variant_path in variant_paths:
+
+     env['HAVE_PKG_CONFIG'] = env.Detect('pkg-config')
+
+-    with gem5_scons.Configure(env) as conf:
++    # Add Homebrew zlib path for macOS (before Configure to ensure test picks it up)
++    if sys.platform == 'darwin':
++        env.Append(CPPPATH=['/opt/homebrew/opt/zlib/include'])
++        env.Append(LIBPATH=['/opt/homebrew/opt/zlib/lib'])
++        env.Append(RPATH=['/opt/homebrew/opt/zlib/lib'])
++
++    # Ensure Configure tests use the same paths
++    conf_env = env.Clone()
++    with gem5_scons.Configure(conf_env) as conf:
+         # On Solaris you need to use libsocket for socket ops
+         if not conf.CheckLibWithHeader(
+                 [None, 'socket'], 'sys/socket.h', 'C++', 'accept(0,0,0);'):
+            error("Can't find library with socket calls (e.g. accept()).")
+
+-        if not conf.CheckLibWithHeader('z', 'zlib.h', 'C++','zlibVersion();'):
+-            error('Did not find needed zlib compression library '
+-                  'and/or zlib.h header file.\n'
+-                  'Please install zlib and try again.')
++        # Skip zlib check on macOS - we've manually added the paths
++        if sys.platform != 'darwin':
++            if not conf.CheckLibWithHeader('z', 'zlib.h', 'C++','zlibVersion();'):
++                error('Did not find needed zlib compression library '
++                      'and/or zlib.h header file.\n'
++                      'Please install zlib and try again.')
+
+     if not GetOption('without_tcmalloc'):
+         with gem5_scons.Configure(env) as conf:
+diff --git a/a2_se.py b/a2_se.py
+new file mode 100644
+index 0000000000..7672e37e1d
+--- /dev/null
++++ b/a2_se.py
+@@ -0,0 +1,232 @@
++import argparse
++import os
++import sys
++
++import m5
++from m5.defines import buildEnv
++from m5.objects import *
++from m5.params import NULL
++from m5.util import (
++    addToPath,
++    fatal,
++    warn,
++)
++
++from gem5.isas import ISA
++
++# addToPath("../gem5/configs/")
++this_dir = os.path.dirname(os.path.abspath(__file__))
++repo_root = this_dir  # a2_se.py is in the repo root
++addToPath(os.path.join(repo_root, "configs"))
++
++from common import (
++    CacheConfig,
++    CpuConfig,
++    MemConfig,
++    ObjectList,
++    Options,
++    Simulation,
++)
++from common.Caches import *
++from common.cpu2000 import *
++from common.FileSystemConfig import config_filesystem
++
++
++def get_processes(args):
++    """Interprets provided args and returns a list of processes"""
++
++    multiprocesses = []
++    inputs = []
++    outputs = []
++    errouts = []
++    pargs = []
++
++    workloads = args.cmd.split(";")
++    if args.input != "":
++        inputs = args.input.split(";")
++    if args.output != "":
++        outputs = args.output.split(";")
++    if args.errout != "":
++        errouts = args.errout.split(";")
++    if args.options != "":
++        pargs = args.options.split(";")
++
++    idx = 0
++    for wrkld in workloads:
++        process = Process(pid=100 + idx)
++        process.executable = wrkld
++        process.cwd = os.getcwd()
++        process.gid = os.getgid()
++
++        if args.env:
++            with open(args.env) as f:
++                process.env = [line.rstrip() for line in f]
++
++        if len(pargs) > idx:
++            process.cmd = [wrkld] + pargs[idx].split()
++        else:
++            process.cmd = [wrkld]
++
++        if len(inputs) > idx:
++            process.input = inputs[idx]
++        if len(outputs) > idx:
++            process.output = outputs[idx]
++        if len(errouts) > idx:
++            process.errout = errouts[idx]
++
++        multiprocesses.append(process)
++        idx += 1
++
++    if args.smt:
++        cpu_type = ObjectList.cpu_list.get(args.cpu_type)
++        assert ObjectList.is_o3_cpu(cpu_type), "SMT requires an O3CPU"
++        return multiprocesses, idx
++    else:
++        return multiprocesses, 1
++
++
++parser = argparse.ArgumentParser()
++Options.addCommonOptions(parser)
++Options.addSEOptions(parser)
++
++args = parser.parse_args()
++
++multiprocesses = []
++numThreads = 1
++
++if args.cmd:
++    multiprocesses, numThreads = get_processes(args)
++else:
++    print("No workload specified. Exiting!\n", file=sys.stderr)
++    sys.exit(1)
++
++#  MinorCPU is an in-order CPU model with four fixed pipeline stages:
++#
++#  Fetch1 - fetches lines from memory
++#  Fetch2 - decomposes lines into macro-op instructions
++#  Decode - decomposes macro-ops into micro-ops
++#  Execute - executes those micro-ops
++
++np = 1
++mp0_path = multiprocesses[0].executable
++system = System(
++    cpu=X86O3CPU(cpu_id=0),  # Initialize cpu type
++    mem_mode="timing",
++    mem_ranges=[AddrRange(args.mem_size)],
++    cache_line_size=args.cacheline_size,
++)
++
++FutureClass = None
++system.membus = SystemXBar()
++system.system_port = system.membus.cpu_side_ports
++
++# Create a top-level voltage and clk domain
++system.voltage_domain = VoltageDomain(voltage=args.sys_voltage)
++system.clk_domain = SrcClockDomain(
++    clock=args.sys_clock, voltage_domain=system.voltage_domain
++)
++
++# Create a CPU voltage and clk domain
++system.cpu_voltage_domain = VoltageDomain()
++system.cpu_clk_domain = SrcClockDomain(
++    clock=args.cpu_clock, voltage_domain=system.cpu_voltage_domain
++)
++system.cpu.clk_domain = system.cpu_clk_domain
++system.cpu.workload = multiprocesses[0]
++
++# Add interrupt controller creation:
++system.cpu.createInterruptController()
++
++# Connect interrupts to memory bus:
++system.cpu.interrupts[0].pio = system.membus.mem_side_ports
++system.cpu.interrupts[0].int_requestor = system.membus.cpu_side_ports
++system.cpu.interrupts[0].int_responder = system.membus.mem_side_ports
++
++# Example to change superscalar width. These are NOT the only parameters.
++# width = 4
++# system.cpu.decodeInputWidth=width
++# system.cpu.executeInputWidth=width
++
++##Add mem config
++system.mem_ctrl = MemCtrl()
++system.mem_ctrl.dram = DDR3_1600_8x8()
++system.mem_ctrl.dram.range = system.mem_ranges[0]
++system.mem_ctrl.port = system.membus.mem_side_ports
++
++# Create L1 Instruction Cache
++class L1ICache(Cache):
++    size = "32kB"
++    assoc = 2
++    tag_latency = 2
++    data_latency = 2
++    response_latency = 2
++    mshrs = 4
++    tgts_per_mshr = 20
++
++
++# Create L1 Data Cache
++class L1DCache(Cache):
++    size = "64kB"
++    assoc = 2
++    tag_latency = 2
++    data_latency = 2
++    response_latency = 2
++    mshrs = 4
++    tgts_per_mshr = 20
++
++
++# Create L2 Cache
++class L2Cache(Cache):
++    size = "256kB"
++    assoc = 8
++    tag_latency = 20
++    data_latency = 20
++    response_latency = 20
++    mshrs = 20
++    tgts_per_mshr = 12
++
++
++# Set up cache hierarchy directly
++system.cpu.icache = L1ICache()
++system.cpu.dcache = L1DCache()
++system.l2cache = L2Cache()
++
++system.cpu.icache_port = system.cpu.icache.cpu_side
++system.cpu.dcache_port = system.cpu.dcache.cpu_side
++
++
++# Create buses
++system.l2bus = L2XBar()
++
++# Connect L1 caches to L2 bus
++system.cpu.icache.mem_side = system.l2bus.cpu_side_ports
++system.cpu.dcache.mem_side = system.l2bus.cpu_side_ports
++
++# Connect L2 cache
++system.l2cache.cpu_side = system.l2bus.mem_side_ports
++system.l2cache.mem_side = system.membus.cpu_side_ports
++
++if args.simpoint_profile:
++    system.cpu.addSimPointProbe(args.simpoint_interval)
++
++if args.checker:
++    system.cpu.addCheckerCpu()
++
++if args.bp_type:
++    bpClass = ObjectList.bp_list.get(args.bp_type)
++    system.cpu.branchPred = bpClass()
++
++if args.indirect_bp_type:
++    indirectBPClass = ObjectList.indirect_bp_list.get(args.indirect_bp_type)
++    system.cpu.branchPred.indirectBranchPred = indirectBPClass()
++
++
++system.cpu.createThreads()
++
++system.workload = SEWorkload.init_compatible(mp0_path)
++
++if args.wait_gdb:
++    system.workload.wait_for_remote_gdb = True
++
++root = Root(full_system=False, system=system)
++Simulation.run(args, root, system, FutureClass)
+diff --git a/runahead_diff.patch b/runahead_diff.patch
+new file mode 100644
+index 0000000000..94b5090af1
+--- /dev/null
++++ b/runahead_diff.patch
+@@ -0,0 +1,1025 @@
++diff --git a/SConstruct b/SConstruct
++index 4fe2f64366..7ecf4918b1 100755
++--- a/SConstruct
+++++ b/SConstruct
++@@ -192,6 +192,7 @@ main = Environment(tools=[
++         ConfigFile, AddLocalRPATH, SwitchingHeaders, TagImpliesTool, Blob
++     ])
++
+++main.Append(LIBS=['z'])
++ main.Tool(SCons.Tool.FindTool(['gcc', 'clang'], main))
++ main.Tool(SCons.Tool.FindTool(['g++', 'clang++'], main))
++
++@@ -628,16 +629,26 @@ for variant_path in variant_paths:
++
++     env['HAVE_PKG_CONFIG'] = env.Detect('pkg-config')
++
++-    with gem5_scons.Configure(env) as conf:
+++    # Add Homebrew zlib path for macOS (before Configure to ensure test picks it up)
+++    if sys.platform == 'darwin':
+++        env.Append(CPPPATH=['/opt/homebrew/opt/zlib/include'])
+++        env.Append(LIBPATH=['/opt/homebrew/opt/zlib/lib'])
+++        env.Append(RPATH=['/opt/homebrew/opt/zlib/lib'])
+++
+++    # Ensure Configure tests use the same paths
+++    conf_env = env.Clone()
+++    with gem5_scons.Configure(conf_env) as conf:
++         # On Solaris you need to use libsocket for socket ops
++         if not conf.CheckLibWithHeader(
++                 [None, 'socket'], 'sys/socket.h', 'C++', 'accept(0,0,0);'):
++            error("Can't find library with socket calls (e.g. accept()).")
++
++-        if not conf.CheckLibWithHeader('z', 'zlib.h', 'C++','zlibVersion();'):
++-            error('Did not find needed zlib compression library '
++-                  'and/or zlib.h header file.\n'
++-                  'Please install zlib and try again.')
+++        # Skip zlib check on macOS - we've manually added the paths
+++        if sys.platform != 'darwin':
+++            if not conf.CheckLibWithHeader('z', 'zlib.h', 'C++','zlibVersion();'):
+++                error('Did not find needed zlib compression library '
+++                      'and/or zlib.h header file.\n'
+++                      'Please install zlib and try again.')
++
++     if not GetOption('without_tcmalloc'):
++         with gem5_scons.Configure(env) as conf:
++diff --git a/a2_se.py b/a2_se.py
++new file mode 100644
++index 0000000000..7672e37e1d
++--- /dev/null
+++++ b/a2_se.py
++@@ -0,0 +1,232 @@
+++import argparse
+++import os
+++import sys
+++
+++import m5
+++from m5.defines import buildEnv
+++from m5.objects import *
+++from m5.params import NULL
+++from m5.util import (
+++    addToPath,
+++    fatal,
+++    warn,
+++)
+++
+++from gem5.isas import ISA
+++
+++# addToPath("../gem5/configs/")
+++this_dir = os.path.dirname(os.path.abspath(__file__))
+++repo_root = this_dir  # a2_se.py is in the repo root
+++addToPath(os.path.join(repo_root, "configs"))
+++
+++from common import (
+++    CacheConfig,
+++    CpuConfig,
+++    MemConfig,
+++    ObjectList,
+++    Options,
+++    Simulation,
+++)
+++from common.Caches import *
+++from common.cpu2000 import *
+++from common.FileSystemConfig import config_filesystem
+++
+++
+++def get_processes(args):
+++    """Interprets provided args and returns a list of processes"""
+++
+++    multiprocesses = []
+++    inputs = []
+++    outputs = []
+++    errouts = []
+++    pargs = []
+++
+++    workloads = args.cmd.split(";")
+++    if args.input != "":
+++        inputs = args.input.split(";")
+++    if args.output != "":
+++        outputs = args.output.split(";")
+++    if args.errout != "":
+++        errouts = args.errout.split(";")
+++    if args.options != "":
+++        pargs = args.options.split(";")
+++
+++    idx = 0
+++    for wrkld in workloads:
+++        process = Process(pid=100 + idx)
+++        process.executable = wrkld
+++        process.cwd = os.getcwd()
+++        process.gid = os.getgid()
+++
+++        if args.env:
+++            with open(args.env) as f:
+++                process.env = [line.rstrip() for line in f]
+++
+++        if len(pargs) > idx:
+++            process.cmd = [wrkld] + pargs[idx].split()
+++        else:
+++            process.cmd = [wrkld]
+++
+++        if len(inputs) > idx:
+++            process.input = inputs[idx]
+++        if len(outputs) > idx:
+++            process.output = outputs[idx]
+++        if len(errouts) > idx:
+++            process.errout = errouts[idx]
+++
+++        multiprocesses.append(process)
+++        idx += 1
+++
+++    if args.smt:
+++        cpu_type = ObjectList.cpu_list.get(args.cpu_type)
+++        assert ObjectList.is_o3_cpu(cpu_type), "SMT requires an O3CPU"
+++        return multiprocesses, idx
+++    else:
+++        return multiprocesses, 1
+++
+++
+++parser = argparse.ArgumentParser()
+++Options.addCommonOptions(parser)
+++Options.addSEOptions(parser)
+++
+++args = parser.parse_args()
+++
+++multiprocesses = []
+++numThreads = 1
+++
+++if args.cmd:
+++    multiprocesses, numThreads = get_processes(args)
+++else:
+++    print("No workload specified. Exiting!\n", file=sys.stderr)
+++    sys.exit(1)
+++
+++#  MinorCPU is an in-order CPU model with four fixed pipeline stages:
+++#
+++#  Fetch1 - fetches lines from memory
+++#  Fetch2 - decomposes lines into macro-op instructions
+++#  Decode - decomposes macro-ops into micro-ops
+++#  Execute - executes those micro-ops
+++
+++np = 1
+++mp0_path = multiprocesses[0].executable
+++system = System(
+++    cpu=X86O3CPU(cpu_id=0),  # Initialize cpu type
+++    mem_mode="timing",
+++    mem_ranges=[AddrRange(args.mem_size)],
+++    cache_line_size=args.cacheline_size,
+++)
+++
+++FutureClass = None
+++system.membus = SystemXBar()
+++system.system_port = system.membus.cpu_side_ports
+++
+++# Create a top-level voltage and clk domain
+++system.voltage_domain = VoltageDomain(voltage=args.sys_voltage)
+++system.clk_domain = SrcClockDomain(
+++    clock=args.sys_clock, voltage_domain=system.voltage_domain
+++)
+++
+++# Create a CPU voltage and clk domain
+++system.cpu_voltage_domain = VoltageDomain()
+++system.cpu_clk_domain = SrcClockDomain(
+++    clock=args.cpu_clock, voltage_domain=system.cpu_voltage_domain
+++)
+++system.cpu.clk_domain = system.cpu_clk_domain
+++system.cpu.workload = multiprocesses[0]
+++
+++# Add interrupt controller creation:
+++system.cpu.createInterruptController()
+++
+++# Connect interrupts to memory bus:
+++system.cpu.interrupts[0].pio = system.membus.mem_side_ports
+++system.cpu.interrupts[0].int_requestor = system.membus.cpu_side_ports
+++system.cpu.interrupts[0].int_responder = system.membus.mem_side_ports
+++
+++# Example to change superscalar width. These are NOT the only parameters.
+++# width = 4
+++# system.cpu.decodeInputWidth=width
+++# system.cpu.executeInputWidth=width
+++
+++##Add mem config
+++system.mem_ctrl = MemCtrl()
+++system.mem_ctrl.dram = DDR3_1600_8x8()
+++system.mem_ctrl.dram.range = system.mem_ranges[0]
+++system.mem_ctrl.port = system.membus.mem_side_ports
+++
+++# Create L1 Instruction Cache
+++class L1ICache(Cache):
+++    size = "32kB"
+++    assoc = 2
+++    tag_latency = 2
+++    data_latency = 2
+++    response_latency = 2
+++    mshrs = 4
+++    tgts_per_mshr = 20
+++
+++
+++# Create L1 Data Cache
+++class L1DCache(Cache):
+++    size = "64kB"
+++    assoc = 2
+++    tag_latency = 2
+++    data_latency = 2
+++    response_latency = 2
+++    mshrs = 4
+++    tgts_per_mshr = 20
+++
+++
+++# Create L2 Cache
+++class L2Cache(Cache):
+++    size = "256kB"
+++    assoc = 8
+++    tag_latency = 20
+++    data_latency = 20
+++    response_latency = 20
+++    mshrs = 20
+++    tgts_per_mshr = 12
+++
+++
+++# Set up cache hierarchy directly
+++system.cpu.icache = L1ICache()
+++system.cpu.dcache = L1DCache()
+++system.l2cache = L2Cache()
+++
+++system.cpu.icache_port = system.cpu.icache.cpu_side
+++system.cpu.dcache_port = system.cpu.dcache.cpu_side
+++
+++
+++# Create buses
+++system.l2bus = L2XBar()
+++
+++# Connect L1 caches to L2 bus
+++system.cpu.icache.mem_side = system.l2bus.cpu_side_ports
+++system.cpu.dcache.mem_side = system.l2bus.cpu_side_ports
+++
+++# Connect L2 cache
+++system.l2cache.cpu_side = system.l2bus.mem_side_ports
+++system.l2cache.mem_side = system.membus.cpu_side_ports
+++
+++if args.simpoint_profile:
+++    system.cpu.addSimPointProbe(args.simpoint_interval)
+++
+++if args.checker:
+++    system.cpu.addCheckerCpu()
+++
+++if args.bp_type:
+++    bpClass = ObjectList.bp_list.get(args.bp_type)
+++    system.cpu.branchPred = bpClass()
+++
+++if args.indirect_bp_type:
+++    indirectBPClass = ObjectList.indirect_bp_list.get(args.indirect_bp_type)
+++    system.cpu.branchPred.indirectBranchPred = indirectBPClass()
+++
+++
+++system.cpu.createThreads()
+++
+++system.workload = SEWorkload.init_compatible(mp0_path)
+++
+++if args.wait_gdb:
+++    system.workload.wait_for_remote_gdb = True
+++
+++root = Root(full_system=False, system=system)
+++Simulation.run(args, root, system, FutureClass)
++diff --git a/src/cpu/o3/SConscript b/src/cpu/o3/SConscript
++index 2ac703b041..6b13183999 100755
++--- a/src/cpu/o3/SConscript
+++++ b/src/cpu/o3/SConscript
++@@ -80,3 +80,4 @@ if not env['CONF']['USE_NULL_ISA']:
++     # For backwards compatibility
++     SimObject('O3CPU.py', sim_objects=[])
++     SimObject('O3Checker.py', sim_objects=[])
+++DebugFlag('Runahead', 'Runahead execution mode')
++diff --git a/src/cpu/o3/commit.cc b/src/cpu/o3/commit.cc
++index 538505bcf9..9fcd5e939c 100644
++--- a/src/cpu/o3/commit.cc
+++++ b/src/cpu/o3/commit.cc
++@@ -63,6 +63,7 @@
++ #include "debug/ExecFaulting.hh"
++ #include "debug/HtmCpu.hh"
++ #include "debug/O3PipeView.hh"
+++#include "debug/Runahead.hh"
++ #include "params/BaseO3CPU.hh"
++ #include "sim/faults.hh"
++ #include "sim/full_system.hh"
++@@ -936,15 +937,86 @@ Commit::commitInsts()
++
++         // ThreadID commit_thread = getCommittingThread();
++
++-        if (commit_thread == -1 || !rob->isHeadReady(commit_thread))
+++        if (commit_thread == -1 || commit_thread == InvalidThreadID)
++             break;
++
++-        head_inst = rob->readHeadInst(commit_thread);
+++        // head_inst = rob->readHeadInst(commit_thread);
+++        // *** FIX 2: get the head safely ***
+++	head_inst = rob->readHeadInst(commit_thread);
+++	if (!head_inst) {
+++    	    // If we're in runahead but the ROB is empty, that's nonsensical:
+++            // there's nothing left to "run ahead" with, so force an exit.
+++            if (cpu->inRunahead(commit_thread)) {
+++                DPRINTF(Runahead,
+++            	    "[tid:%d] ROB head null while in runahead; forcing runahead exit\n",
+++            	    commit_thread);
+++            	cpu->exitRunahead(commit_thread, "rob_empty");
+++    	    }
+++
+++    	    DPRINTF(Commit,
+++        	"[tid:%d] ROB head is null, nothing to commit this cycle\n",
+++        	commit_thread);
+++    	    break;
+++	}
++
++         ThreadID tid = head_inst->threadNumber;
++
++         assert(tid == commit_thread);
++
+++        // ===== Runahead trigger: head of ROB not ready
+++        // and looks like an outstanding load miss =====
+++        if (!rob->isHeadReady(tid)) {
+++            DPRINTF(Commit,
+++                "[tid:%d] Head of ROB not ready at sn:%llu (PC %s)\n",
+++                tid, head_inst->seqNum, head_inst->pcState());
+++
+++            // Skip redundant runahead entries on the same anchor
+++            if (cpu->inRunahead(tid) &&
+++                cpu->runaheadAnchorSeqNum(tid) == head_inst->seqNum) {
+++                DPRINTF(Runahead,
+++                    "[tid:%d] Already in runahead for anchor sn:%llu\n",
+++                    tid, head_inst->seqNum);
+++                break;
+++            }
+++
+++            Addr anchor_pc = head_inst->pcState().instAddr();
+++
+++            // Only allow entering runahead on fault-free
+++            // loads with outstanding mem requests
+++            if (!rob->isHeadReady(tid) &&
+++                cpu->enableRunahead &&
+++                !cpu->inRunahead(tid) &&
+++                head_inst->getFault() == NoFault &&
+++                head_inst->isLoad() &&
+++                // head_inst->hasRequest() &&
+++                anchor_pc != cpu->lastRunaheadAnchorPC[tid])
+++            {
+++                DPRINTF(Runahead,
+++                    "[tid:%d] Head load stall; entering runahead at sn:%llu\n",
+++                    tid, head_inst->seqNum);
+++
+++                cpu->enterRunahead(tid, head_inst->seqNum);
+++                cpu->lastRunaheadAnchorPC[tid] = anchor_pc;
+++            }
+++            else if (!rob->isHeadReady(tid) &&
+++                 cpu->enableRunahead &&
+++                 !cpu->inRunahead(tid) &&
+++                 head_inst->isLoad() &&
+++                 // head_inst->hasRequest() &&
+++                 anchor_pc == cpu->lastRunaheadAnchorPC[tid])
+++            {
+++
+++    DPRINTF(Runahead,
+++"[tid:%d] Head ld stall at sn:%llu but we already ran ahead for "
+++        "this PC; falling back to normal stall\n",
+++        tid, head_inst->seqNum);
+++            }
+++
+++            // Either we entered runahead or we stall commit here
+++            break;
+++        }
+++        // ======================================
+++
++         DPRINTF(Commit,
++                 "Trying to commit head instruction, [tid:%i] [sn:%llu]\n",
++                 tid, head_inst->seqNum);
++@@ -967,6 +1039,78 @@ Commit::commitInsts()
++         } else {
++             set(pc[tid], head_inst->pcState());
++
+++            // Runahead: Check if we need to exit runahead mode
+++            if (cpu->inRunahead(tid)) {
+++                // Check if anchor instruction is being committed
+++
+++                if (head_inst->seqNum == cpu->runaheadAnchorSeqNum(tid)) {
+++                    Fault f = head_inst->getFault();
+++
+++                    if (f != NoFault) {
+++                        // Anchor faulted while in runahead:
+++                        // treat as "bad runahead
+++                        DPRINTF(Runahead,
+++                       "[tid:%d] Anchor [sn:%llu] fault %s during runahead; "
+++                            "exiting runahead and discarding anchor\n",
+++                            tid, head_inst->seqNum, f->name());
+++
+++                        // Exit runahead (restore checkpoint +
+++                        // squash pipeline)
+++                        cpu->exitRunahead(tid, "anchor fault");
+++
+++                        // Throw away this anchor instead
+++                        // of committing/faulting it
+++                        head_inst->setSquashed();
+++                        rob->retireHead(tid);
+++                        ++stats.commitSquashedInsts;
+++                        ppSquash->notify(head_inst);
+++                        changedROBNumEntries[tid] = true;
+++
+++                        // Do not reach commitHead() this cycle
+++                        break;
+++                    }
+++
+++                    DPRINTF(Runahead,
+++                    "[tid:%d] Anchor [sn:%llu] reached head; exiting runahead "
+++                        "and restarting from checkpoint\n",
+++                        tid, head_inst->seqNum);
+++
+++                    // Exit runahead: restore checkpoint + squash pipeline.
+++                    cpu->exitRunahead(tid, "anchor reached");
+++
+++                    // Do NOT commit this instruction in the same cycle.
+++                    // After the squash, we will re-fetch
+++                    // and re-execute from the
+++                    // checkpointed PC, and eventually
+++                    // this instruction will reappear
+++                    // as a normal (non-runahead) head
+++                    // and commit in the usual way.
+++                    break;
+++                }
+++
+++                /* if (head_inst->seqNum == cpu->runaheadAnchorSeqNum(tid)) {
+++                    DPRINTF(Runahead,
+++                    "[tid:%d] Anchor [sn:%llu] committing, exit runahead\n",
+++                            tid, head_inst->seqNum);
+++                    cpu->exitRunahead(tid, "anchor committed");
+++                } */
+++
+++                // Check if budget exhausted
+++                else if (cpu->raBudget[tid] <= 0) {
+++                    DPRINTF(Runahead, "[tid:%d] Budget exhausted, exit runahead\n", tid);
+++                    cpu->exitRunahead(tid, "budget exhausted");
+++                }
+++                // Pseudo-retire runahead instructions
+++                else if (head_inst->inRunahead()) {
+++                    DPRINTF(Runahead, "[tid:%d] Pseudo-retiring instruction [sn:%llu]\n",
+++                            tid, head_inst->seqNum);
+++                    cpu->cpuStats.pseudoRetiredInsts[tid]++;
+++                    cpu->raBudget[tid]--;
+++                    rob->retireHead(tid);
+++                    continue;
+++                }
+++            }
+++
++             // Try to commit the head instruction.
++             bool commit_success = commitHead(head_inst, num_committed);
++
++@@ -1042,6 +1186,20 @@ Commit::commitInsts()
++                     }
++                 }
++
+++                // ==================
+++                // If a TC squash or trap is pending, don't run PC
+++                // events this cycle.
+++                // This can happen when exiting runahead
+++                // (we generate a TC squash).
+++                if (thread[tid]->noSquashFromTC || thread[tid]->trapPending) {
+++                    DPRINTF(Commit,
+++                            "[tid:%d] TC squash/trap pending after commit; "
+++                            "skipping PC events this cycle\n",
+++                            tid);
+++                    break;
+++                }
+++                // =================
+++
++                 bool onInstBoundary = !head_inst->isMicroop() ||
++                                       head_inst->isLastMicroop() ||
++                                       !head_inst->isDelayedCommit();
++@@ -1190,6 +1348,18 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
++             cpu->checker->verify(head_inst);
++         }
++
+++        // Runahead / TC interaction:
+++        // If we're here with noSquashFromTC already set (e.g., due to a
+++        // prior TC squash from runahead exit), clear it so this trap can
+++        // take ownership of the TC squash state.
+++        if (thread[tid]->noSquashFromTC) {
+++            DPRINTF(Commit,
+++                    "[tid:%d] noSquashFromTC already set before fault; "
+++                    "clearing and proceeding (likely runahead exit)\n",
+++                    tid);
+++            thread[tid]->noSquashFromTC = false;
+++        }
+++
++         assert(!thread[tid]->noSquashFromTC);
++
++         // Mark that we're in state update mode so that the trap's
++diff --git a/src/cpu/o3/commit.hh b/src/cpu/o3/commit.hh
++index eccd023d45..d826d62a16 100644
++--- a/src/cpu/o3/commit.hh
+++++ b/src/cpu/o3/commit.hh
++@@ -42,6 +42,7 @@
++ #define __CPU_O3_COMMIT_HH__
++
++ #include <queue>
+++#include <vector>
++
++ #include "base/statistics.hh"
++ #include "cpu/exetrace.hh"
++diff --git a/src/cpu/o3/cpu.cc b/src/cpu/o3/cpu.cc
++index 85cc3dbf71..c372e82817 100644
++--- a/src/cpu/o3/cpu.cc
+++++ b/src/cpu/o3/cpu.cc
++@@ -54,6 +54,7 @@
++ #include "debug/Drain.hh"
++ #include "debug/O3CPU.hh"
++ #include "debug/Quiesce.hh"
+++#include "debug/Runahead.hh"
++ #include "enums/MemoryMode.hh"
++ #include "sim/cur_tick.hh"
++ #include "sim/full_system.hh"
++@@ -299,6 +300,12 @@ CPU::CPU(const BaseO3CPUParams &params)
++         fatal("O3CPU %s has no interrupt controller.\n"
++               "Ensure createInterruptController() is called.\n", name());
++     }
+++
+++    // NEW:
+++    lastRunaheadAnchorPC.resize(numThreads);
+++    for (ThreadID tid = 0; tid < numThreads; ++tid) {
+++        lastRunaheadAnchorPC[tid] = (InstSeqNum)(-1);
+++    }
++ }
++
++ void
++@@ -328,7 +335,15 @@ CPU::CPUStats::CPUStats(CPU *cpu)
++                "to idling"),
++       ADD_STAT(quiesceCycles, statistics::units::Cycle::get(),
++                "Total number of cycles that CPU has spent quiesced or waiting "
++-               "for an interrupt")
+++               "for an interrupt"),
+++      ADD_STAT(runaheadPeriods, statistics::units::Count::get(),
+++               "Number of runahead periods entered"),
+++      ADD_STAT(pseudoRetiredInsts, statistics::units::Count::get(),
+++               "Number of instructions pseudo-retired in runahead"),
+++      ADD_STAT(raExitAnchor, statistics::units::Count::get(),
+++               "Number of runahead exits due to anchor commit"),
+++      ADD_STAT(raExitBudget, statistics::units::Count::get(),
+++               "Number of runahead exits due to budget exhaustion")
++ {
++     // Register any of the O3CPU's stats here.
++     timesIdled
++@@ -339,6 +354,18 @@ CPU::CPUStats::CPUStats(CPU *cpu)
++
++     quiesceCycles
++         .prereq(quiesceCycles);
+++
+++    pseudoRetiredInsts
+++        .init(cpu->numThreads)
+++        .flags(statistics::total);
+++
+++    raExitAnchor
+++        .init(cpu->numThreads)
+++        .flags(statistics::total);
+++
+++    raExitBudget
+++        .init(cpu->numThreads)
+++        .flags(statistics::total);
++ }
++
++ void
++@@ -1424,6 +1451,77 @@ CPU::exitThreads()
++     }
++ }
++
+++void
+++CPU::enterRunahead(ThreadID tid, InstSeqNum anchor_sn)
+++{
+++    if (_inRunahead[tid]) {
+++        DPRINTF(Runahead, "[tid:%d] Already in runahead mode\n", tid);
+++        return;
+++    }
+++
+++    DPRINTF(Runahead, "[tid:%d] Entering runahead mode (anchor sn:%llu)\n",
+++            tid, anchor_sn);
+++
+++    // Checkpoint state
+++    raCkpt[tid].pc = std::unique_ptr<PCStateBase>(pcState(tid).clone());
+++    raCkpt[tid].valid = true;
+++    raCkpt[tid].renameMapSnapshot = rename.checkpointRenameMap(tid);
+++    raCkpt[tid].freeListSnapshot = freeList.checkpoint();
+++
+++    // Set runahead state
+++    _inRunahead[tid] = true;
+++    raAnchorSeqNum[tid] = anchor_sn;
+++    raBudget[tid] = raDefaultBudget;
+++
+++    // Update stats
+++    cpuStats.runaheadPeriods++;
+++}
+++
+++void
+++CPU::exitRunahead(ThreadID tid, const char *reason)
+++{
+++    if (!_inRunahead[tid]) {
+++        return;
+++    }
+++
+++    DPRINTF(Runahead, "[tid:%d] Exiting runahead mode: %s\n", tid, reason);
+++
+++    // Update exit reason stats
+++    if (std::string(reason).find("anchor") != std::string::npos) {
+++        cpuStats.raExitAnchor[tid]++;
+++    } else if (std::string(reason).find("budget") != std::string::npos) {
+++        cpuStats.raExitBudget[tid]++;
+++    }
+++
+++    // Restore architectural state
+++    if (raCkpt[tid].valid && raCkpt[tid].pc) {
+++        // Restore PC
+++        //set(pcState(tid), *raCkpt[tid].pc);
+++        pcState(*raCkpt[tid].pc, tid);
+++
+++        // Restore rename map and free list
+++        rename.restoreRenameMap(tid, raCkpt[tid].renameMapSnapshot);
+++        freeList.restore(raCkpt[tid].freeListSnapshot);
+++
+++        // Clear checkpoint
+++        raCkpt[tid].renameMapSnapshot.clear();
+++        raCkpt[tid].freeListSnapshot.clear();
+++        raCkpt[tid].pc.reset(); // ==== I ADDED ====
+++        raCkpt[tid].valid = false;
+++    }
+++
+++    // Fix dependency graph after restore
+++    iew.squash(tid);
+++
+++    // Squash pipeline from runahead anchor
+++    squashFromTC(tid);
+++
+++    // Clear runahead state
+++    _inRunahead[tid] = false;
+++    raAnchorSeqNum[tid] = 0;
+++    raBudget[tid] = 0;
+++}
+++
++ void
++ CPU::htmSendAbortSignal(ThreadID tid, uint64_t htm_uid,
++         HtmFailureFaultCause cause)
++diff --git a/src/cpu/o3/cpu.hh b/src/cpu/o3/cpu.hh
++index 1d100ab330..0985944c03 100644
++--- a/src/cpu/o3/cpu.hh
+++++ b/src/cpu/o3/cpu.hh
++@@ -544,6 +544,33 @@ class CPU : public BaseCPU
++     /** Available thread ids in the cpu*/
++     std::vector<ThreadID> tids;
++
+++    /** Runahead execution state */
+++    struct RunaheadCkpt
+++    {
+++        std::unique_ptr<PCStateBase> pc;
+++        bool valid = false;
+++
+++        std::vector<std::vector<PhysRegIdPtr>> renameMapSnapshot;
+++        std::vector<std::vector<PhysRegIdPtr>> freeListSnapshot;
+++    };
+++    std::array<RunaheadCkpt, MaxThreads> raCkpt;
+++
+++    /** Runahead configuration and state */
+++    bool enableRunahead = true;
+++    bool _inRunahead[MaxThreads] = {false};
+++    int raBudget[MaxThreads] = {0};
+++    int raDefaultBudget = 1000;
+++    InstSeqNum raAnchorSeqNum[MaxThreads] = {0};
+++
+++     // NEW:
+++    std::vector<Addr> lastRunaheadAnchorPC; // size = numThreads
+++
+++    /** Runahead mode control */
+++    void enterRunahead(ThreadID tid, InstSeqNum anchor_sn);
+++    void exitRunahead(ThreadID tid, const char *reason);
+++    bool inRunahead(ThreadID tid) const { return _inRunahead[tid]; }
+++    InstSeqNum runaheadAnchorSeqNum(ThreadID tid) const { return raAnchorSeqNum[tid]; }
+++
++     /** CPU pushRequest function, forwards request to LSQ. */
++     Fault
++     pushRequest(const DynInstPtr& inst, bool isLoad, uint8_t *data,
++@@ -581,6 +608,12 @@ class CPU : public BaseCPU
++         /** Stat for total number of cycles the CPU spends descheduled due to a
++          * quiesce operation or waiting for an interrupt. */
++         statistics::Scalar quiesceCycles;
+++
+++        /** Runahead execution stats */
+++        statistics::Scalar runaheadPeriods;
+++        statistics::Vector pseudoRetiredInsts;
+++        statistics::Vector raExitAnchor;
+++        statistics::Vector raExitBudget;
++     } cpuStats;
++
++   public:
++diff --git a/src/cpu/o3/dyn_inst.hh b/src/cpu/o3/dyn_inst.hh
++index 63bf5ac59d..0f6aa57a60 100644
++--- a/src/cpu/o3/dyn_inst.hh
+++++ b/src/cpu/o3/dyn_inst.hh
++@@ -187,6 +187,8 @@ class DynInst : public ExecContext, public RefCounted
++         ReqMade,
++         MemOpDone,
++         HtmFromTransaction,
+++        InRunahead,              // Instruction is executing in runahead mode
+++        RunaheadPoisoned,        // Load result is poisoned (missed in runahead)
++         MaxFlags
++     };
++
++@@ -928,6 +930,12 @@ class DynInst : public ExecContext, public RefCounted
++     bool strictlyOrdered() const { return instFlags[IsStrictlyOrdered]; }
++     void strictlyOrdered(bool so) { instFlags[IsStrictlyOrdered] = so; }
++
+++    /** Runahead execution flags */
+++    bool inRunahead() const { return instFlags[InRunahead]; }
+++    void inRunahead(bool f) { instFlags[InRunahead] = f; }
+++    bool isRunaheadPoisoned() const { return instFlags[RunaheadPoisoned]; }
+++    void setRunaheadPoisoned(bool f) { instFlags[RunaheadPoisoned] = f; }
+++
++     /** Has this instruction generated a memory request. */
++     bool hasRequest() const { return instFlags[ReqMade]; }
++     /** Assert this instruction has generated a memory request. */
++diff --git a/src/cpu/o3/free_list.hh b/src/cpu/o3/free_list.hh
++index 408d6e06ab..022b120f93 100644
++--- a/src/cpu/o3/free_list.hh
+++++ b/src/cpu/o3/free_list.hh
++@@ -105,6 +105,29 @@ class SimpleFreeList
++
++     /** True iff there are free registers on the list. */
++     bool hasFreeRegs() const { return !freeRegs.empty(); }
+++
+++    /** Runahead: Checkpoint free list */
+++    std::vector<PhysRegIdPtr> checkpoint() const
+++    {
+++        std::vector<PhysRegIdPtr> snapshot;
+++        std::queue<PhysRegIdPtr> temp = freeRegs;
+++        while (!temp.empty()) {
+++            snapshot.push_back(temp.front());
+++            temp.pop();
+++        }
+++        return snapshot;
+++    }
+++
+++    /** Runahead: Restore free list */
+++    void restore(const std::vector<PhysRegIdPtr>& snapshot)
+++    {
+++        while (!freeRegs.empty()) {
+++            freeRegs.pop();
+++        }
+++        for (auto reg : snapshot) {
+++            freeRegs.push(reg);
+++        }
+++    }
++ };
++
++
++@@ -189,6 +212,24 @@ class UnifiedFreeList
++     {
++         return freeLists[type].numFreeRegs();
++     }
+++
+++    /** Runahead: Checkpoint all free lists */
+++    std::vector<std::vector<PhysRegIdPtr>> checkpoint() const
+++    {
+++        std::vector<std::vector<PhysRegIdPtr>> snapshot;
+++        for (int i = 0; i < CCRegClass + 1; i++) {
+++            snapshot.push_back(freeLists[i].checkpoint());
+++        }
+++        return snapshot;
+++    }
+++
+++    /** Runahead: Restore all free lists */
+++    void restore(const std::vector<std::vector<PhysRegIdPtr>>& snapshot)
+++    {
+++        for (int i = 0; i < snapshot.size() && i < CCRegClass + 1; i++) {
+++            freeLists[i].restore(snapshot[i]);
+++        }
+++    }
++ };
++
++ } // namespace o3
++diff --git a/src/cpu/o3/iew.cc b/src/cpu/o3/iew.cc
++index a8acb4c762..ecf74d3ae1 100644
++--- a/src/cpu/o3/iew.cc
+++++ b/src/cpu/o3/iew.cc
++@@ -56,6 +56,7 @@
++ #include "debug/Drain.hh"
++ #include "debug/IEW.hh"
++ #include "debug/O3PipeView.hh"
+++#include "debug/Runahead.hh"
++ #include "params/BaseO3CPU.hh"
++
++ namespace gem5
++@@ -1128,6 +1129,19 @@ IEW::executeInsts()
++         // executing
++         ppExecute->notify(inst);
++
+++        // Runahead: Propagate poison to dependent instructions
+++        if (inst->inRunahead() && !inst->isRunaheadPoisoned()) {
+++            // Check if any source registers are poisoned (not ready means potentially poisoned)
+++            for (int src_idx = 0; src_idx < inst->numSrcRegs(); src_idx++) {
+++                if (!inst->readySrcIdx(src_idx)) {
+++                    inst->setRunaheadPoisoned(true);
+++                    DPRINTF(Runahead, "[tid:%d] Propagating poison to [sn:%llu]\n",
+++                            inst->threadNumber, inst->seqNum);
+++                    break;
+++                }
+++            }
+++        }
+++
++         // Check if the instruction is squashed; if so then skip it
++         if (inst->isSquashed()) {
++             DPRINTF(IEW, "Execute: Instruction was squashed. PC: %s, [tid:%i]"
++diff --git a/src/cpu/o3/inst_queue.cc b/src/cpu/o3/inst_queue.cc
++index b236b7518e..aab7030d51 100644
++--- a/src/cpu/o3/inst_queue.cc
+++++ b/src/cpu/o3/inst_queue.cc
++@@ -1315,8 +1315,27 @@ InstructionQueue::doSquash(ThreadID tid)
++             if (dest_reg->isFixedMapping()){
++                 continue;
++             }
++-            assert(dependGraph.empty(dest_reg->flatIndex()));
++-            dependGraph.clearInst(dest_reg->flatIndex());
+++
+++            // ========================
+++
+++            int flat = dest_reg->flatIndex();
+++
+++            // In our runahead + TC-squash path, we can legitimately see
+++            // non-empty dependency graph entries here (stale consumers on a
+++            // producer we're throwing away). Instead of asserting, just clear
+++            // the producer entry.
+++            if (!dependGraph.empty(flat)) {
+++                DPRINTF(IQ,
+++    "doSquash: clearing non-empty dependGraph entry for reg flat:%d\n",
+++                    flat);
+++            }
+++
+++            dependGraph.clearInst(flat);
+++
+++            // ========================
+++
+++            //assert(dependGraph.empty(dest_reg->flatIndex()));
+++            //dependGraph.clearInst(dest_reg->flatIndex());
++         }
++         instList[tid].erase(squash_it--);
++         ++iqStats.squashedInstsExamined;
++@@ -1398,12 +1417,14 @@ InstructionQueue::addToProducers(const DynInstPtr &new_inst)
++             continue;
++         }
++
+++        /*
++         if (!dependGraph.empty(dest_reg->flatIndex())) {
++             dependGraph.dump();
++             panic("Dependency graph %i (%s) (flat: %i) not empty!",
++                   dest_reg->index(), dest_reg->className(),
++                   dest_reg->flatIndex());
++         }
+++        */
++
++         dependGraph.setInst(dest_reg->flatIndex(), new_inst);
++
++diff --git a/src/cpu/o3/lsq_unit.cc b/src/cpu/o3/lsq_unit.cc
++index 139e0de337..148e9dc49d 100644
++--- a/src/cpu/o3/lsq_unit.cc
+++++ b/src/cpu/o3/lsq_unit.cc
++@@ -51,6 +51,7 @@
++ #include "debug/HtmCpu.hh"
++ #include "debug/IEW.hh"
++ #include "debug/LSQUnit.hh"
+++#include "debug/Runahead.hh"
++ #include "debug/O3PipeView.hh"
++ #include "mem/packet.hh"
++ #include "mem/request.hh"
++@@ -162,6 +163,14 @@ LSQUnit::completeDataAccess(PacketPtr pkt)
++
++     cpu->ppDataAccessComplete->notify(std::make_pair(inst, pkt));
++
+++    // Runahead: Poison loads that miss in cache during runahead
+++    if (inst->inRunahead() && inst->isLoad() && !pkt->req->isUncacheable()) {
+++        // If the request went to memory (not satisfied by cache), poison it
+++        inst->setRunaheadPoisoned(true);
+++        DPRINTF(Runahead, "[tid:%d] Poisoning runahead load [sn:%llu] (cache miss)\n",
+++                lsqID, inst->seqNum);
+++    }
+++
++     assert(!cpu->switchedOut());
++     if (!inst->isSquashed()) {
++         if (request->needWBToRegister()) {
++@@ -806,6 +815,14 @@ LSQUnit::writebackStores()
++             break;
++         }
++
+++        // Runahead: Suppress stores in runahead mode
+++        if (storeWBIt->instruction()->inRunahead()) {
+++            DPRINTF(Runahead, "[tid:%d] Suppressing runahead store [sn:%llu]\n",
+++                    lsqID, storeWBIt->instruction()->seqNum);
+++            completeStore(storeWBIt++);
+++            continue;
+++        }
+++
++         // Store didn't write any data so no need to write it back to
++         // memory.
++         if (storeWBIt->size() == 0) {
++diff --git a/src/cpu/o3/rename.cc b/src/cpu/o3/rename.cc
++index f8c305eb1c..5a2b4a4a67 100644
++--- a/src/cpu/o3/rename.cc
+++++ b/src/cpu/o3/rename.cc
++@@ -50,6 +50,7 @@
++ #include "debug/Activity.hh"
++ #include "debug/O3PipeView.hh"
++ #include "debug/Rename.hh"
+++#include "debug/Runahead.hh"
++ #include "params/BaseO3CPU.hh"
++
++ namespace gem5
++@@ -657,6 +658,13 @@ Rename::renameInsts(ThreadID tid)
++                 "Processing instruction [sn:%llu] with PC %s.\n",
++                 tid, inst->seqNum, inst->pcState());
++
+++        // Mark instruction if in runahead mode
+++        if (cpu->inRunahead(tid)) {
+++            inst->inRunahead(true);
+++            DPRINTF(Runahead, "[tid:%d] Marked instruction [sn:%llu] as runahead\n",
+++                    tid, inst->seqNum);
+++        }
+++
++         // Check here to make sure there are enough destination registers
++         // to rename to.  Otherwise block.
++         if (!renameMap[tid]->canRename(inst)) {
++@@ -1432,5 +1440,47 @@ Rename::dumpHistory()
++     }
++ }
++
+++std::vector<std::vector<PhysRegIdPtr>>
+++Rename::checkpointRenameMap(ThreadID tid)
+++{
+++    std::vector<std::vector<PhysRegIdPtr>> snapshot;
+++
+++    // Access the internal renameMaps array (we're a friend class)
+++    for (int reg_class_idx = 0; reg_class_idx < CCRegClass + 1; reg_class_idx++) {
+++        const auto& simple_map = renameMap[tid]->renameMaps[reg_class_idx];
+++        std::vector<PhysRegIdPtr> class_snapshot;
+++
+++        // Copy the entire map vector
+++        for (auto it = simple_map.begin(); it != simple_map.end(); ++it) {
+++            class_snapshot.push_back(*it);
+++        }
+++
+++        snapshot.push_back(class_snapshot);
+++    }
+++
+++    return snapshot;
+++}
+++
+++void
+++Rename::restoreRenameMap(ThreadID tid,
+++                        const std::vector<std::vector<PhysRegIdPtr>>& snapshot)
+++{
+++    for (int reg_class_idx = 0; reg_class_idx < snapshot.size() &&
+++         reg_class_idx < CCRegClass + 1; reg_class_idx++) {
+++        auto& simple_map = renameMap[tid]->renameMaps[reg_class_idx];
+++        const auto& class_snapshot = snapshot[reg_class_idx];
+++
+++        // Restore each mapping by index
+++        for (size_t arch_reg = 0; arch_reg < class_snapshot.size(); arch_reg++) {
+++            if (arch_reg < simple_map.numArchRegs()) {
+++                // Create a RegId using index directly for setEntry
+++                auto it = simple_map.begin();
+++                std::advance(it, arch_reg);
+++                *it = class_snapshot[arch_reg];
+++            }
+++        }
+++    }
+++}
+++
++ } // namespace o3
++ } // namespace gem5
++diff --git a/src/cpu/o3/rename.hh b/src/cpu/o3/rename.hh
++index 61ef476501..7161e4d71e 100644
++--- a/src/cpu/o3/rename.hh
+++++ b/src/cpu/o3/rename.hh
++@@ -198,6 +198,11 @@ class Rename
++     /** Debugging function used to dump history buffer of renamings. */
++     void dumpHistory();
++
+++    /** Runahead: Checkpoint and restore rename map */
+++    std::vector<std::vector<PhysRegIdPtr>> checkpointRenameMap(ThreadID tid);
+++    void restoreRenameMap(ThreadID tid,
+++                         const std::vector<std::vector<PhysRegIdPtr>>& snapshot);
+++
++   private:
++     /** Reset this pipeline stage */
++     void resetStage();
++diff --git a/src/cpu/o3/rename_map.hh b/src/cpu/o3/rename_map.hh
++index 640c2acbba..abc226366b 100644
++--- a/src/cpu/o3/rename_map.hh
+++++ b/src/cpu/o3/rename_map.hh
++@@ -178,6 +178,9 @@ class UnifiedRenameMap
++      */
++     PhysRegFile *regFile;
++
+++    // Friend class for runahead checkpoint/restore
+++    friend class Rename;
+++
++   public:
++
++     typedef SimpleRenameMap::RenameInfo RenameInfo;
+diff --git a/src/cpu/o3/SConscript b/src/cpu/o3/SConscript
+index 2ac703b041..6b13183999 100755
+--- a/src/cpu/o3/SConscript
++++ b/src/cpu/o3/SConscript
+@@ -80,3 +80,4 @@ if not env['CONF']['USE_NULL_ISA']:
+     # For backwards compatibility
+     SimObject('O3CPU.py', sim_objects=[])
+     SimObject('O3Checker.py', sim_objects=[])
++DebugFlag('Runahead', 'Runahead execution mode')
+diff --git a/src/cpu/o3/commit.cc b/src/cpu/o3/commit.cc
+index 538505bcf9..d8975206bc 100644
+--- a/src/cpu/o3/commit.cc
++++ b/src/cpu/o3/commit.cc
+@@ -63,6 +63,7 @@
+ #include "debug/ExecFaulting.hh"
+ #include "debug/HtmCpu.hh"
+ #include "debug/O3PipeView.hh"
++#include "debug/Runahead.hh"
+ #include "params/BaseO3CPU.hh"
+ #include "sim/faults.hh"
+ #include "sim/full_system.hh"
+@@ -936,15 +937,105 @@ Commit::commitInsts()
+
+         // ThreadID commit_thread = getCommittingThread();
+
+-        if (commit_thread == -1 || !rob->isHeadReady(commit_thread))
++        if (commit_thread == -1 || commit_thread == InvalidThreadID)
+             break;
+
++        // head_inst = rob->readHeadInst(commit_thread);
++        // *** FIX 2: get the head safely ***
+         head_inst = rob->readHeadInst(commit_thread);
++        if (!head_inst) {
++            // If we're in runahead but the ROB is empty, that's nonsensical:
++            // there's nothing left to "run ahead" with, so force an exit.
++            if (cpu->inRunahead(commit_thread)) {
++                DPRINTF(Runahead,
++       "[tid:%d] ROB head null while in runahead; forcing runahead exit\n",
++                    commit_thread);
++                cpu->exitRunahead(commit_thread, "rob_empty");
++            }
++
++            DPRINTF(Commit,
++                "[tid:%d] ROB head is null, nothing to commit this cycle\n",
++                commit_thread);
++            break;
++        }
+
+         ThreadID tid = head_inst->threadNumber;
+
+         assert(tid == commit_thread);
+
++
++        // ===== Runahead trigger: head of ROB not ready
++        // and looks like an outstanding load miss =====
++        if (!rob->isHeadReady(tid)) {
++            /* DPRINTF(Commit,
++                "[tid:%d] Head of ROB not ready at sn:%llu (PC %s)\n",
++                tid, head_inst->seqNum, head_inst->pcState()); */
++
++            bool completed   = head_inst->isCompleted();
++bool execed      = head_inst->isExecuted();
++bool canCommit   = head_inst->readyToCommit();
++bool inIQ        = head_inst->isInIQ();
++bool inLSQ       = head_inst->isInLSQ();
++bool isLoad      = head_inst->isLoad();
++bool isSquashed  = head_inst->isSquashed();
++
++DPRINTF(Commit,
++    "[tid:%d] Head [sn:%llu] PC %s inRunahead=%d "
++    "completed=%d execed=%d canCommit=%d "
++    "inIQ=%d inLSQ=%d isLoad=%d squashed=%d\n",
++    tid, head_inst->seqNum, head_inst->pcState(),
++    head_inst->inRunahead(),
++    completed, execed, canCommit,
++    inIQ, inLSQ, isLoad, isSquashed);
++
++            // Skip redundant runahead entries on the same anchor
++            if (cpu->inRunahead(tid) &&
++                cpu->runaheadAnchorSeqNum(tid) == head_inst->seqNum) {
++                DPRINTF(Runahead,
++                    "[tid:%d] Already in runahead for anchor sn:%llu\n",
++                    tid, head_inst->seqNum);
++                break;
++            }
++
++            Addr anchor_pc = head_inst->pcState().instAddr();
++
++            // Only allow entering runahead on fault-free
++            // loads with outstanding mem requests
++            if (!rob->isHeadReady(tid) &&
++                cpu->enableRunahead &&
++                !cpu->inRunahead(tid) &&
++                head_inst->getFault() == NoFault &&
++                head_inst->isLoad() &&
++                // head_inst->hasRequest() &&
++                anchor_pc != cpu->lastRunaheadAnchorPC[tid])
++            {
++                DPRINTF(Runahead,
++                    "[tid:%d] Head load stall; entering runahead at sn:%llu\n",
++                    tid, head_inst->seqNum);
++
++                cpu->enterRunahead(tid, head_inst->seqNum);
++                cpu->lastRunaheadAnchorPC[tid] = anchor_pc;
++            }
++            else if (!rob->isHeadReady(tid) &&
++                 cpu->enableRunahead &&
++                 !cpu->inRunahead(tid) &&
++                 head_inst->isLoad() &&
++                 // head_inst->hasRequest() &&
++                 anchor_pc == cpu->lastRunaheadAnchorPC[tid])
++            {
++
++    DPRINTF(Runahead,
++"[tid:%d] Head ld stall at sn:%llu but we already ran ahead for "
++        "this PC; falling back to normal stall\n",
++        tid, head_inst->seqNum);
++            }
++
++
++            // Either we entered runahead or we stall commit here
++            break;
++        }
++        // ======================================
++
+         DPRINTF(Commit,
+                 "Trying to commit head instruction, [tid:%i] [sn:%llu]\n",
+                 tid, head_inst->seqNum);
+@@ -967,6 +1058,86 @@ Commit::commitInsts()
+         } else {
+             set(pc[tid], head_inst->pcState());
+
++            // Runahead: Check if we need to exit runahead mode
++            if (cpu->inRunahead(tid)) {
++                // Check if anchor instruction is being committed
++
++                if (head_inst->seqNum == cpu->runaheadAnchorSeqNum(tid)) {
++                    Fault f = head_inst->getFault();
++
++                    if (f != NoFault) {
++                        // Anchor faulted while in runahead:
++                        // treat as "bad runahead
++                        DPRINTF(Runahead,
++                       "[tid:%d] Anchor [sn:%llu] fault %s during runahead; "
++                            "exiting runahead and discarding anchor\n",
++                            tid, head_inst->seqNum, f->name());
++
++                        // Exit runahead (restore checkpoint +
++                        // squash pipeline)
++                        cpu->exitRunahead(tid, "anchor fault");
++
++                        // Throw away this anchor instead
++                        // of committing/faulting it
++                        head_inst->setSquashed();
++                        rob->retireHead(tid);
++                        ++stats.commitSquashedInsts;
++                        ppSquash->notify(head_inst);
++                        changedROBNumEntries[tid] = true;
++
++                        // Do not reach commitHead() this cycle
++                        break;
++                    }
++
++                    DPRINTF(Runahead,
++                    "[tid:%d] Anchor [sn:%llu] reached head; exiting runahead "
++                        "and restarting from checkpoint\n",
++                        tid, head_inst->seqNum);
++
++                    // Exit runahead: restore checkpoint + squash pipeline.
++                    cpu->exitRunahead(tid, "anchor reached");
++
++                    // Throw away this runahead copy of the anchor.
++        // We'll refetch and re-execute it from the restored PC.
++        head_inst->setSquashed();
++        rob->retireHead(tid);
++        ++stats.commitSquashedInsts;
++        ppSquash->notify(head_inst);
++        changedROBNumEntries[tid] = true;
++
++                    // Do NOT commit this instruction in the same cycle.
++                    // After the squash, we will re-fetch
++                    // and re-execute from the
++                    // checkpointed PC, and eventually
++                    // this instruction will reappear
++                    // as a normal (non-runahead) head
++                    // and commit in the usual way.
++                    break;
++                }
++
++                /* if (head_inst->seqNum == cpu->runaheadAnchorSeqNum(tid)) {
++                    DPRINTF(Runahead,
++                    "[tid:%d] Anchor [sn:%llu] committing, exit runahead\n",
++                            tid, head_inst->seqNum);
++                    cpu->exitRunahead(tid, "anchor committed");
++                } */
++
++                // Check if budget exhausted
++                else if (cpu->raBudget[tid] <= 0) {
++                    DPRINTF(Runahead, "[tid:%d] Budget exhausted, exit runahead\n", tid);
++                    cpu->exitRunahead(tid, "budget exhausted");
++                }
++                // Pseudo-retire runahead instructions
++                else if (head_inst->inRunahead()) {
++                    DPRINTF(Runahead, "[tid:%d] Pseudo-retiring instruction [sn:%llu]\n",
++                            tid, head_inst->seqNum);
++                    cpu->cpuStats.pseudoRetiredInsts[tid]++;
++                    cpu->raBudget[tid]--;
++                    rob->retireHead(tid);
++                    continue;
++                }
++            }
++
+             // Try to commit the head instruction.
+             bool commit_success = commitHead(head_inst, num_committed);
+
+@@ -1042,6 +1213,20 @@ Commit::commitInsts()
+                     }
+                 }
+
++                // ==================
++                // If a TC squash or trap is pending, don't run PC
++                // events this cycle.
++                // This can happen when exiting runahead
++                // (we generate a TC squash).
++                if (thread[tid]->noSquashFromTC || thread[tid]->trapPending) {
++                    DPRINTF(Commit,
++                            "[tid:%d] TC squash/trap pending after commit; "
++                            "skipping PC events this cycle\n",
++                            tid);
++                    break;
++                }
++                // =================
++
+                 bool onInstBoundary = !head_inst->isMicroop() ||
+                                       head_inst->isLastMicroop() ||
+                                       !head_inst->isDelayedCommit();
+@@ -1190,6 +1375,18 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
+             cpu->checker->verify(head_inst);
+         }
+
++        // Runahead / TC interaction:
++        // If we're here with noSquashFromTC already set (e.g., due to a
++        // prior TC squash from runahead exit), clear it so this trap can
++        // take ownership of the TC squash state.
++        if (thread[tid]->noSquashFromTC) {
++            DPRINTF(Commit,
++                    "[tid:%d] noSquashFromTC already set before fault; "
++                    "clearing and proceeding (likely runahead exit)\n",
++                    tid);
++            thread[tid]->noSquashFromTC = false;
++        }
++
+         assert(!thread[tid]->noSquashFromTC);
+
+         // Mark that we're in state update mode so that the trap's
+diff --git a/src/cpu/o3/commit.hh b/src/cpu/o3/commit.hh
+index eccd023d45..d826d62a16 100644
+--- a/src/cpu/o3/commit.hh
++++ b/src/cpu/o3/commit.hh
+@@ -42,6 +42,7 @@
+ #define __CPU_O3_COMMIT_HH__
+
+ #include <queue>
++#include <vector>
+
+ #include "base/statistics.hh"
+ #include "cpu/exetrace.hh"
+diff --git a/src/cpu/o3/cpu.cc b/src/cpu/o3/cpu.cc
+index 85cc3dbf71..97758a1406 100644
+--- a/src/cpu/o3/cpu.cc
++++ b/src/cpu/o3/cpu.cc
+@@ -54,6 +54,7 @@
+ #include "debug/Drain.hh"
+ #include "debug/O3CPU.hh"
+ #include "debug/Quiesce.hh"
++#include "debug/Runahead.hh"
+ #include "enums/MemoryMode.hh"
+ #include "sim/cur_tick.hh"
+ #include "sim/full_system.hh"
+@@ -299,6 +300,12 @@ CPU::CPU(const BaseO3CPUParams &params)
+         fatal("O3CPU %s has no interrupt controller.\n"
+               "Ensure createInterruptController() is called.\n", name());
+     }
++
++    // NEW:
++    lastRunaheadAnchorPC.resize(numThreads);
++    for (ThreadID tid = 0; tid < numThreads; ++tid) {
++        lastRunaheadAnchorPC[tid] = (InstSeqNum)(-1);
++    }
+ }
+
+ void
+@@ -328,7 +335,15 @@ CPU::CPUStats::CPUStats(CPU *cpu)
+                "to idling"),
+       ADD_STAT(quiesceCycles, statistics::units::Cycle::get(),
+                "Total number of cycles that CPU has spent quiesced or waiting "
+-               "for an interrupt")
++               "for an interrupt"),
++      ADD_STAT(runaheadPeriods, statistics::units::Count::get(),
++               "Number of runahead periods entered"),
++      ADD_STAT(pseudoRetiredInsts, statistics::units::Count::get(),
++               "Number of instructions pseudo-retired in runahead"),
++      ADD_STAT(raExitAnchor, statistics::units::Count::get(),
++               "Number of runahead exits due to anchor commit"),
++      ADD_STAT(raExitBudget, statistics::units::Count::get(),
++               "Number of runahead exits due to budget exhaustion")
+ {
+     // Register any of the O3CPU's stats here.
+     timesIdled
+@@ -339,6 +354,18 @@ CPU::CPUStats::CPUStats(CPU *cpu)
+
+     quiesceCycles
+         .prereq(quiesceCycles);
++
++    pseudoRetiredInsts
++        .init(cpu->numThreads)
++        .flags(statistics::total);
++
++    raExitAnchor
++        .init(cpu->numThreads)
++        .flags(statistics::total);
++
++    raExitBudget
++        .init(cpu->numThreads)
++        .flags(statistics::total);
+ }
+
+ void
+@@ -1424,6 +1451,74 @@ CPU::exitThreads()
+     }
+ }
+
++void
++CPU::enterRunahead(ThreadID tid, InstSeqNum anchor_sn)
++{
++    if (_inRunahead[tid]) {
++        DPRINTF(Runahead, "[tid:%d] Already in runahead mode\n", tid);
++        return;
++    }
++
++    DPRINTF(Runahead, "[tid:%d] Entering runahead mode (anchor sn:%llu)\n",
++            tid, anchor_sn);
++
++    // Checkpoint state
++    raCkpt[tid].pc = std::unique_ptr<PCStateBase>(pcState(tid).clone());
++    raCkpt[tid].valid = true;
++    raCkpt[tid].renameMapSnapshot = rename.checkpointRenameMap(tid);
++    raCkpt[tid].freeListSnapshot = freeList.checkpoint();
++
++    // Set runahead state
++    _inRunahead[tid] = true;
++    raAnchorSeqNum[tid] = anchor_sn;
++    raBudget[tid] = raDefaultBudget;
++
++    // Update stats
++    cpuStats.runaheadPeriods++;
++}
++
++void
++CPU::exitRunahead(ThreadID tid, const char *reason)
++{
++    if (!_inRunahead[tid])
++        return;
++
++    DPRINTF(Runahead, "[tid:%d] Exiting runahead mode: %s\n", tid, reason);
++
++    // Update exit reason stats
++    if (reason && std::string(reason).find("anchor") != std::string::npos) {
++        cpuStats.raExitAnchor[tid]++;
++    } else if (reason
++        && std::string(reason).find("budget") != std::string::npos) {
++        cpuStats.raExitBudget[tid]++;
++    }
++
++    // 1) Flush pipeline / speculative state first
++    // This will squash ROB/IEW/LSQ/rename state for this thread.
++    squashFromTC(tid);
++
++    // 2) Restore architectural state from checkpoint
++    if (raCkpt[tid].valid && raCkpt[tid].pc) {
++        // Restore PC for this thread
++        pcState(*raCkpt[tid].pc, tid);
++
++        // Restore rename map and free list
++        rename.restoreRenameMap(tid, raCkpt[tid].renameMapSnapshot);
++        freeList.restore(raCkpt[tid].freeListSnapshot);
++
++        // Clear checkpoint
++        raCkpt[tid].renameMapSnapshot.clear();
++        raCkpt[tid].freeListSnapshot.clear();
++        raCkpt[tid].pc.reset();
++        raCkpt[tid].valid = false;
++    }
++
++    // 3) Clear runahead state
++    _inRunahead[tid] = false;
++    raAnchorSeqNum[tid] = 0;
++    raBudget[tid] = 0;
++}
++
+ void
+ CPU::htmSendAbortSignal(ThreadID tid, uint64_t htm_uid,
+         HtmFailureFaultCause cause)
+diff --git a/src/cpu/o3/cpu.hh b/src/cpu/o3/cpu.hh
+index 1d100ab330..2ca5fba1c6 100644
+--- a/src/cpu/o3/cpu.hh
++++ b/src/cpu/o3/cpu.hh
+@@ -544,6 +544,33 @@ class CPU : public BaseCPU
+     /** Available thread ids in the cpu*/
+     std::vector<ThreadID> tids;
+
++    /** Runahead execution state */
++    struct RunaheadCkpt
++    {
++        std::unique_ptr<PCStateBase> pc;
++        bool valid = false;
++
++        std::vector<std::vector<PhysRegIdPtr>> renameMapSnapshot;
++        std::vector<std::vector<PhysRegIdPtr>> freeListSnapshot;
++    };
++    std::array<RunaheadCkpt, MaxThreads> raCkpt;
++
++    /** Runahead configuration and state */
++    bool enableRunahead = true;
++    bool _inRunahead[MaxThreads] = {false};
++    int raBudget[MaxThreads] = {0};
++    int raDefaultBudget = 100;
++    InstSeqNum raAnchorSeqNum[MaxThreads] = {0};
++
++     // NEW:
++    std::vector<Addr> lastRunaheadAnchorPC; // size = numThreads
++
++    /** Runahead mode control */
++    void enterRunahead(ThreadID tid, InstSeqNum anchor_sn);
++    void exitRunahead(ThreadID tid, const char *reason);
++    bool inRunahead(ThreadID tid) const { return _inRunahead[tid]; }
++    InstSeqNum runaheadAnchorSeqNum(ThreadID tid) const { return raAnchorSeqNum[tid]; }
++
+     /** CPU pushRequest function, forwards request to LSQ. */
+     Fault
+     pushRequest(const DynInstPtr& inst, bool isLoad, uint8_t *data,
+@@ -581,6 +608,12 @@ class CPU : public BaseCPU
+         /** Stat for total number of cycles the CPU spends descheduled due to a
+          * quiesce operation or waiting for an interrupt. */
+         statistics::Scalar quiesceCycles;
++
++        /** Runahead execution stats */
++        statistics::Scalar runaheadPeriods;
++        statistics::Vector pseudoRetiredInsts;
++        statistics::Vector raExitAnchor;
++        statistics::Vector raExitBudget;
+     } cpuStats;
+
+   public:
+diff --git a/src/cpu/o3/dyn_inst.hh b/src/cpu/o3/dyn_inst.hh
+index 63bf5ac59d..0f6aa57a60 100644
+--- a/src/cpu/o3/dyn_inst.hh
++++ b/src/cpu/o3/dyn_inst.hh
+@@ -187,6 +187,8 @@ class DynInst : public ExecContext, public RefCounted
+         ReqMade,
+         MemOpDone,
+         HtmFromTransaction,
++        InRunahead,              // Instruction is executing in runahead mode
++        RunaheadPoisoned,        // Load result is poisoned (missed in runahead)
+         MaxFlags
+     };
+
+@@ -928,6 +930,12 @@ class DynInst : public ExecContext, public RefCounted
+     bool strictlyOrdered() const { return instFlags[IsStrictlyOrdered]; }
+     void strictlyOrdered(bool so) { instFlags[IsStrictlyOrdered] = so; }
+
++    /** Runahead execution flags */
++    bool inRunahead() const { return instFlags[InRunahead]; }
++    void inRunahead(bool f) { instFlags[InRunahead] = f; }
++    bool isRunaheadPoisoned() const { return instFlags[RunaheadPoisoned]; }
++    void setRunaheadPoisoned(bool f) { instFlags[RunaheadPoisoned] = f; }
++
+     /** Has this instruction generated a memory request. */
+     bool hasRequest() const { return instFlags[ReqMade]; }
+     /** Assert this instruction has generated a memory request. */
+diff --git a/src/cpu/o3/free_list.hh b/src/cpu/o3/free_list.hh
+index 408d6e06ab..022b120f93 100644
+--- a/src/cpu/o3/free_list.hh
++++ b/src/cpu/o3/free_list.hh
+@@ -105,6 +105,29 @@ class SimpleFreeList
+
+     /** True iff there are free registers on the list. */
+     bool hasFreeRegs() const { return !freeRegs.empty(); }
++
++    /** Runahead: Checkpoint free list */
++    std::vector<PhysRegIdPtr> checkpoint() const
++    {
++        std::vector<PhysRegIdPtr> snapshot;
++        std::queue<PhysRegIdPtr> temp = freeRegs;
++        while (!temp.empty()) {
++            snapshot.push_back(temp.front());
++            temp.pop();
++        }
++        return snapshot;
++    }
++
++    /** Runahead: Restore free list */
++    void restore(const std::vector<PhysRegIdPtr>& snapshot)
++    {
++        while (!freeRegs.empty()) {
++            freeRegs.pop();
++        }
++        for (auto reg : snapshot) {
++            freeRegs.push(reg);
++        }
++    }
+ };
+
+
+@@ -189,6 +212,24 @@ class UnifiedFreeList
+     {
+         return freeLists[type].numFreeRegs();
+     }
++
++    /** Runahead: Checkpoint all free lists */
++    std::vector<std::vector<PhysRegIdPtr>> checkpoint() const
++    {
++        std::vector<std::vector<PhysRegIdPtr>> snapshot;
++        for (int i = 0; i < CCRegClass + 1; i++) {
++            snapshot.push_back(freeLists[i].checkpoint());
++        }
++        return snapshot;
++    }
++
++    /** Runahead: Restore all free lists */
++    void restore(const std::vector<std::vector<PhysRegIdPtr>>& snapshot)
++    {
++        for (int i = 0; i < snapshot.size() && i < CCRegClass + 1; i++) {
++            freeLists[i].restore(snapshot[i]);
++        }
++    }
+ };
+
+ } // namespace o3
+diff --git a/src/cpu/o3/iew.cc b/src/cpu/o3/iew.cc
+index a8acb4c762..ecf74d3ae1 100644
+--- a/src/cpu/o3/iew.cc
++++ b/src/cpu/o3/iew.cc
+@@ -56,6 +56,7 @@
+ #include "debug/Drain.hh"
+ #include "debug/IEW.hh"
+ #include "debug/O3PipeView.hh"
++#include "debug/Runahead.hh"
+ #include "params/BaseO3CPU.hh"
+
+ namespace gem5
+@@ -1128,6 +1129,19 @@ IEW::executeInsts()
+         // executing
+         ppExecute->notify(inst);
+
++        // Runahead: Propagate poison to dependent instructions
++        if (inst->inRunahead() && !inst->isRunaheadPoisoned()) {
++            // Check if any source registers are poisoned (not ready means potentially poisoned)
++            for (int src_idx = 0; src_idx < inst->numSrcRegs(); src_idx++) {
++                if (!inst->readySrcIdx(src_idx)) {
++                    inst->setRunaheadPoisoned(true);
++                    DPRINTF(Runahead, "[tid:%d] Propagating poison to [sn:%llu]\n",
++                            inst->threadNumber, inst->seqNum);
++                    break;
++                }
++            }
++        }
++
+         // Check if the instruction is squashed; if so then skip it
+         if (inst->isSquashed()) {
+             DPRINTF(IEW, "Execute: Instruction was squashed. PC: %s, [tid:%i]"
+diff --git a/src/cpu/o3/inst_queue.cc b/src/cpu/o3/inst_queue.cc
+index b236b7518e..897b0e2471 100644
+--- a/src/cpu/o3/inst_queue.cc
++++ b/src/cpu/o3/inst_queue.cc
+@@ -1315,6 +1315,7 @@ InstructionQueue::doSquash(ThreadID tid)
+             if (dest_reg->isFixedMapping()){
+                 continue;
+             }
++
+             assert(dependGraph.empty(dest_reg->flatIndex()));
+             dependGraph.clearInst(dest_reg->flatIndex());
+         }
+diff --git a/src/cpu/o3/lsq_unit.cc b/src/cpu/o3/lsq_unit.cc
+index 139e0de337..148e9dc49d 100644
+--- a/src/cpu/o3/lsq_unit.cc
++++ b/src/cpu/o3/lsq_unit.cc
+@@ -51,6 +51,7 @@
+ #include "debug/HtmCpu.hh"
+ #include "debug/IEW.hh"
+ #include "debug/LSQUnit.hh"
++#include "debug/Runahead.hh"
+ #include "debug/O3PipeView.hh"
+ #include "mem/packet.hh"
+ #include "mem/request.hh"
+@@ -162,6 +163,14 @@ LSQUnit::completeDataAccess(PacketPtr pkt)
+
+     cpu->ppDataAccessComplete->notify(std::make_pair(inst, pkt));
+
++    // Runahead: Poison loads that miss in cache during runahead
++    if (inst->inRunahead() && inst->isLoad() && !pkt->req->isUncacheable()) {
++        // If the request went to memory (not satisfied by cache), poison it
++        inst->setRunaheadPoisoned(true);
++        DPRINTF(Runahead, "[tid:%d] Poisoning runahead load [sn:%llu] (cache miss)\n",
++                lsqID, inst->seqNum);
++    }
++
+     assert(!cpu->switchedOut());
+     if (!inst->isSquashed()) {
+         if (request->needWBToRegister()) {
+@@ -806,6 +815,14 @@ LSQUnit::writebackStores()
+             break;
+         }
+
++        // Runahead: Suppress stores in runahead mode
++        if (storeWBIt->instruction()->inRunahead()) {
++            DPRINTF(Runahead, "[tid:%d] Suppressing runahead store [sn:%llu]\n",
++                    lsqID, storeWBIt->instruction()->seqNum);
++            completeStore(storeWBIt++);
++            continue;
++        }
++
+         // Store didn't write any data so no need to write it back to
+         // memory.
+         if (storeWBIt->size() == 0) {
+diff --git a/src/cpu/o3/rename.cc b/src/cpu/o3/rename.cc
+index f8c305eb1c..60368a0d3a 100644
+--- a/src/cpu/o3/rename.cc
++++ b/src/cpu/o3/rename.cc
+@@ -50,6 +50,7 @@
+ #include "debug/Activity.hh"
+ #include "debug/O3PipeView.hh"
+ #include "debug/Rename.hh"
++#include "debug/Runahead.hh"
+ #include "params/BaseO3CPU.hh"
+
+ namespace gem5
+@@ -657,6 +658,15 @@ Rename::renameInsts(ThreadID tid)
+                 "Processing instruction [sn:%llu] with PC %s.\n",
+                 tid, inst->seqNum, inst->pcState());
+
++        // Mark instruction if in runahead mode
++        // if (cpu->inRunahead(tid)) {
++        if (cpu->inRunahead(tid) &&
++            inst->seqNum > cpu->runaheadAnchorSeqNum(tid)) {
++            inst->inRunahead(true);
++            DPRINTF(Runahead, "[tid:%d] Marked instruction [sn:%llu] as runahead\n",
++                    tid, inst->seqNum);
++        }
++
+         // Check here to make sure there are enough destination registers
+         // to rename to.  Otherwise block.
+         if (!renameMap[tid]->canRename(inst)) {
+@@ -1432,5 +1442,47 @@ Rename::dumpHistory()
+     }
+ }
+
++std::vector<std::vector<PhysRegIdPtr>>
++Rename::checkpointRenameMap(ThreadID tid)
++{
++    std::vector<std::vector<PhysRegIdPtr>> snapshot;
++
++    // Access the internal renameMaps array (we're a friend class)
++    for (int reg_class_idx = 0; reg_class_idx < CCRegClass + 1; reg_class_idx++) {
++        const auto& simple_map = renameMap[tid]->renameMaps[reg_class_idx];
++        std::vector<PhysRegIdPtr> class_snapshot;
++
++        // Copy the entire map vector
++        for (auto it = simple_map.begin(); it != simple_map.end(); ++it) {
++            class_snapshot.push_back(*it);
++        }
++
++        snapshot.push_back(class_snapshot);
++    }
++
++    return snapshot;
++}
++
++void
++Rename::restoreRenameMap(ThreadID tid,
++                        const std::vector<std::vector<PhysRegIdPtr>>& snapshot)
++{
++    for (int reg_class_idx = 0; reg_class_idx < snapshot.size() &&
++         reg_class_idx < CCRegClass + 1; reg_class_idx++) {
++        auto& simple_map = renameMap[tid]->renameMaps[reg_class_idx];
++        const auto& class_snapshot = snapshot[reg_class_idx];
++
++        // Restore each mapping by index
++        for (size_t arch_reg = 0; arch_reg < class_snapshot.size(); arch_reg++) {
++            if (arch_reg < simple_map.numArchRegs()) {
++                // Create a RegId using index directly for setEntry
++                auto it = simple_map.begin();
++                std::advance(it, arch_reg);
++                *it = class_snapshot[arch_reg];
++            }
++        }
++    }
++}
++
+ } // namespace o3
+ } // namespace gem5
+diff --git a/src/cpu/o3/rename.hh b/src/cpu/o3/rename.hh
+index 61ef476501..7161e4d71e 100644
+--- a/src/cpu/o3/rename.hh
++++ b/src/cpu/o3/rename.hh
+@@ -198,6 +198,11 @@ class Rename
+     /** Debugging function used to dump history buffer of renamings. */
+     void dumpHistory();
+
++    /** Runahead: Checkpoint and restore rename map */
++    std::vector<std::vector<PhysRegIdPtr>> checkpointRenameMap(ThreadID tid);
++    void restoreRenameMap(ThreadID tid,
++                         const std::vector<std::vector<PhysRegIdPtr>>& snapshot);
++
+   private:
+     /** Reset this pipeline stage */
+     void resetStage();
+diff --git a/src/cpu/o3/rename_map.hh b/src/cpu/o3/rename_map.hh
+index 640c2acbba..abc226366b 100644
+--- a/src/cpu/o3/rename_map.hh
++++ b/src/cpu/o3/rename_map.hh
+@@ -178,6 +178,9 @@ class UnifiedRenameMap
+      */
+     PhysRegFile *regFile;
+
++    // Friend class for runahead checkpoint/restore
++    friend class Rename;
++
+   public:
+
+     typedef SimpleRenameMap::RenameInfo RenameInfo;
