@@ -559,7 +559,7 @@ class CPU : public BaseCPU
     bool enableRunahead = true;
     bool _inRunahead[MaxThreads] = {false};
     int raBudget[MaxThreads] = {0};
-    int raDefaultBudget = 1000;
+    int raDefaultBudget = 100;
     InstSeqNum raAnchorSeqNum[MaxThreads] = {0};
 
      // NEW:

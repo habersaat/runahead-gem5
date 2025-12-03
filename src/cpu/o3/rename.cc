@@ -659,7 +659,9 @@ Rename::renameInsts(ThreadID tid)
                 tid, inst->seqNum, inst->pcState());
 
         // Mark instruction if in runahead mode
-        if (cpu->inRunahead(tid)) {
+        // if (cpu->inRunahead(tid)) {
+        if (cpu->inRunahead(tid) &&
+            inst->seqNum > cpu->runaheadAnchorSeqNum(tid)) {
             inst->inRunahead(true);
             DPRINTF(Runahead, "[tid:%d] Marked instruction [sn:%llu] as runahead\n",
                     tid, inst->seqNum);
@@ -1444,32 +1446,32 @@ std::vector<std::vector<PhysRegIdPtr>>
 Rename::checkpointRenameMap(ThreadID tid)
 {
     std::vector<std::vector<PhysRegIdPtr>> snapshot;
-    
+
     // Access the internal renameMaps array (we're a friend class)
     for (int reg_class_idx = 0; reg_class_idx < CCRegClass + 1; reg_class_idx++) {
         const auto& simple_map = renameMap[tid]->renameMaps[reg_class_idx];
         std::vector<PhysRegIdPtr> class_snapshot;
-        
+
         // Copy the entire map vector
         for (auto it = simple_map.begin(); it != simple_map.end(); ++it) {
             class_snapshot.push_back(*it);
         }
-        
+
         snapshot.push_back(class_snapshot);
     }
-    
+
     return snapshot;
 }
 
 void
-Rename::restoreRenameMap(ThreadID tid, 
+Rename::restoreRenameMap(ThreadID tid,
                         const std::vector<std::vector<PhysRegIdPtr>>& snapshot)
 {
-    for (int reg_class_idx = 0; reg_class_idx < snapshot.size() && 
+    for (int reg_class_idx = 0; reg_class_idx < snapshot.size() &&
          reg_class_idx < CCRegClass + 1; reg_class_idx++) {
         auto& simple_map = renameMap[tid]->renameMaps[reg_class_idx];
         const auto& class_snapshot = snapshot[reg_class_idx];
-        
+
         // Restore each mapping by index
         for (size_t arch_reg = 0; arch_reg < class_snapshot.size(); arch_reg++) {
             if (arch_reg < simple_map.numArchRegs()) {

@@ -1316,26 +1316,8 @@ InstructionQueue::doSquash(ThreadID tid)
                 continue;
             }
 
-            // ========================
-
-            int flat = dest_reg->flatIndex();
-
-            // In our runahead + TC-squash path, we can legitimately see
-            // non-empty dependency graph entries here (stale consumers on a
-            // producer we're throwing away). Instead of asserting, just clear
-            // the producer entry.
-            if (!dependGraph.empty(flat)) {
-                DPRINTF(IQ,
-    "doSquash: clearing non-empty dependGraph entry for reg flat:%d\n",
-                    flat);
-            }
-
-            dependGraph.clearInst(flat);
-
-            // ========================
-
-            //assert(dependGraph.empty(dest_reg->flatIndex()));
-            //dependGraph.clearInst(dest_reg->flatIndex());
+            assert(dependGraph.empty(dest_reg->flatIndex()));
+            dependGraph.clearInst(dest_reg->flatIndex());
         }
         instList[tid].erase(squash_it--);
         ++iqStats.squashedInstsExamined;
@@ -1417,14 +1399,12 @@ InstructionQueue::addToProducers(const DynInstPtr &new_inst)
             continue;
         }
 
-        /*
         if (!dependGraph.empty(dest_reg->flatIndex())) {
             dependGraph.dump();
             panic("Dependency graph %i (%s) (flat: %i) not empty!",
                   dest_reg->index(), dest_reg->className(),
                   dest_reg->flatIndex());
         }
-        */
 
         dependGraph.setInst(dest_reg->flatIndex(), new_inst);
 

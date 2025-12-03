@@ -1480,23 +1480,26 @@ CPU::enterRunahead(ThreadID tid, InstSeqNum anchor_sn)
 void
 CPU::exitRunahead(ThreadID tid, const char *reason)
 {
-    if (!_inRunahead[tid]) {
+    if (!_inRunahead[tid])
         return;
-    }
 
     DPRINTF(Runahead, "[tid:%d] Exiting runahead mode: %s\n", tid, reason);
 
     // Update exit reason stats
-    if (std::string(reason).find("anchor") != std::string::npos) {
+    if (reason && std::string(reason).find("anchor") != std::string::npos) {
         cpuStats.raExitAnchor[tid]++;
-    } else if (std::string(reason).find("budget") != std::string::npos) {
+    } else if (reason
+        && std::string(reason).find("budget") != std::string::npos) {
         cpuStats.raExitBudget[tid]++;
     }
 
-    // Restore architectural state
+    // 1) Flush pipeline / speculative state first
+    // This will squash ROB/IEW/LSQ/rename state for this thread.
+    squashFromTC(tid);
+
+    // 2) Restore architectural state from checkpoint
     if (raCkpt[tid].valid && raCkpt[tid].pc) {
-        // Restore PC
-        //set(pcState(tid), *raCkpt[tid].pc);
+        // Restore PC for this thread
         pcState(*raCkpt[tid].pc, tid);
 
         // Restore rename map and free list
@@ -1506,17 +1509,11 @@ CPU::exitRunahead(ThreadID tid, const char *reason)
         // Clear checkpoint
         raCkpt[tid].renameMapSnapshot.clear();
         raCkpt[tid].freeListSnapshot.clear();
-        raCkpt[tid].pc.reset(); // ==== I ADDED ====
+        raCkpt[tid].pc.reset();
         raCkpt[tid].valid = false;
     }
 
-    // Fix dependency graph after restore
-    iew.squash(tid);
-
-    // Squash pipeline from runahead anchor
-    squashFromTC(tid);
-
-    // Clear runahead state
+    // 3) Clear runahead state
     _inRunahead[tid] = false;
     raAnchorSeqNum[tid] = 0;
     raBudget[tid] = 0;

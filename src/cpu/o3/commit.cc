@@ -944,6 +944,15 @@ Commit::commitInsts()
         // *** FIX 2: get the head safely ***
         head_inst = rob->readHeadInst(commit_thread);
         if (!head_inst) {
+            // If we're in runahead but the ROB is empty, that's nonsensical:
+            // there's nothing left to "run ahead" with, so force an exit.
+            if (cpu->inRunahead(commit_thread)) {
+                DPRINTF(Runahead,
+       "[tid:%d] ROB head null while in runahead; forcing runahead exit\n",
+                    commit_thread);
+                cpu->exitRunahead(commit_thread, "rob_empty");
+            }
+
             DPRINTF(Commit,
                 "[tid:%d] ROB head is null, nothing to commit this cycle\n",
                 commit_thread);
@@ -954,12 +963,30 @@ Commit::commitInsts()
 
         assert(tid == commit_thread);
 
+
         // ===== Runahead trigger: head of ROB not ready
         // and looks like an outstanding load miss =====
         if (!rob->isHeadReady(tid)) {
-            DPRINTF(Commit,
+            /* DPRINTF(Commit,
                 "[tid:%d] Head of ROB not ready at sn:%llu (PC %s)\n",
-                tid, head_inst->seqNum, head_inst->pcState());
+                tid, head_inst->seqNum, head_inst->pcState()); */
+
+            bool completed   = head_inst->isCompleted();
+bool execed      = head_inst->isExecuted();
+bool canCommit   = head_inst->readyToCommit();
+bool inIQ        = head_inst->isInIQ();
+bool inLSQ       = head_inst->isInLSQ();
+bool isLoad      = head_inst->isLoad();
+bool isSquashed  = head_inst->isSquashed();
+
+DPRINTF(Commit,
+    "[tid:%d] Head [sn:%llu] PC %s inRunahead=%d "
+    "completed=%d execed=%d canCommit=%d "
+    "inIQ=%d inLSQ=%d isLoad=%d squashed=%d\n",
+    tid, head_inst->seqNum, head_inst->pcState(),
+    head_inst->inRunahead(),
+    completed, execed, canCommit,
+    inIQ, inLSQ, isLoad, isSquashed);
 
             // Skip redundant runahead entries on the same anchor
             if (cpu->inRunahead(tid) &&
@@ -979,7 +1006,7 @@ Commit::commitInsts()
                 !cpu->inRunahead(tid) &&
                 head_inst->getFault() == NoFault &&
                 head_inst->isLoad() &&
-                head_inst->hasRequest() &&
+                // head_inst->hasRequest() &&
                 anchor_pc != cpu->lastRunaheadAnchorPC[tid])
             {
                 DPRINTF(Runahead,
@@ -993,7 +1020,7 @@ Commit::commitInsts()
                  cpu->enableRunahead &&
                  !cpu->inRunahead(tid) &&
                  head_inst->isLoad() &&
-                 head_inst->hasRequest() &&
+                 // head_inst->hasRequest() &&
                  anchor_pc == cpu->lastRunaheadAnchorPC[tid])
             {
 
@@ -1002,6 +1029,7 @@ Commit::commitInsts()
         "this PC; falling back to normal stall\n",
         tid, head_inst->seqNum);
             }
+
 
             // Either we entered runahead or we stall commit here
             break;
@@ -1068,6 +1096,14 @@ Commit::commitInsts()
 
                     // Exit runahead: restore checkpoint + squash pipeline.
                     cpu->exitRunahead(tid, "anchor reached");
+
+                    // Throw away this runahead copy of the anchor.
+        // We'll refetch and re-execute it from the restored PC.
+        head_inst->setSquashed();
+        rob->retireHead(tid);
+        ++stats.commitSquashedInsts;
+        ppSquash->notify(head_inst);
+        changedROBNumEntries[tid] = true;
 
                     // Do NOT commit this instruction in the same cycle.
                     // After the squash, we will re-fetch
