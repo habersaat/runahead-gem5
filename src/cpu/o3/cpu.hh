@@ -558,7 +558,7 @@ class CPU : public BaseCPU
     std::array<RunaheadCkpt, MaxThreads> raCkpt;
 
     /** Runahead configuration and state */
-    bool enableRunahead = true;
+    bool enableRunahead = false;
     bool _inRunahead[MaxThreads] = {false};
     int raBudget[MaxThreads] = {0};
     int raDefaultBudget = 100;
